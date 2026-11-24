@@ -86,6 +86,7 @@ const sfx = {
   win:   () => [523, 659, 784, 1047].forEach((f, i) => beep(f, 0.2, 'square', 0, 0.05, i * 0.13)),
   over:  () => [392, 330, 262, 196].forEach((f, i) => beep(f, 0.3, 'triangle', 0, 0.07, i * 0.2)),
   check: () => { beep(660, 0.1, 'square'); beep(880, 0.2, 'square', 0, 0.05, 0.1); },
+  meow:  () => { beep(650, 0.12, 'sawtooth', 450, 0.05); beep(1150, 0.28, 'sawtooth', -650, 0.05, 0.12); },
   power: () => [523, 784, 1047, 1568].forEach((f, i) => beep(f, 0.14, 'square', 0, 0.05, i * 0.07)),
 };
 
@@ -154,6 +155,10 @@ function buildLevel() {
   // nepřátelé na vysokých plošinách
   enemies.push({ x: 90 * T, y: 10 * T - 26, w: 28, h: 26, vx: 0, vy: 0, dir: 1, dead: false, timer: 0, anim: 0 });
   enemies.push({ x: 36 * T, y: 10 * T - 26, w: 28, h: 26, vx: 0, vy: 0, dir: 1, dead: false, timer: 0, anim: 0 });
+
+  // Kočky: po prvním skoku zaječí a zuří, zabít jdou až druhým skokem
+  [21, 31, 55, 83, 98, 121].forEach((x, i) => enemies.push({ type: 'cat', x: x * T + 1, y: GROUND_ROW * T - 22,
+      w: 30, h: 22, vx: 0, vy: 0, dir: i % 2 ? 1 : -1, dead: false, timer: 0, anim: 0, angry: false, stun: 0 }));
 
   checkpoint = { x: 66 * T, reached: false, spawnX: 64 * T };
 }
@@ -376,8 +381,10 @@ function updatePlay() {
       continue;
     }
     if (e.x + e.w < camL || e.x > camR) continue;       // mimo dosah
-    e.anim += 0.12;
-    e.vx = e.dir * 0.9;
+    if (e.stun > 0) e.stun--;
+    else e.anim += e.angry ? 0.3 : 0.12;
+    const spd = e.type === 'cat' ? (e.angry ? 2.7 : 1.1) : 0.9;
+    e.vx = e.stun > 0 ? 0 : e.dir * spd;
     e.vy = Math.min(e.vy + 0.5, 10);
     const r = moveBody(e);
     if (r.hitX) e.dir *= -1;
@@ -390,10 +397,18 @@ function updatePlay() {
 
     if (overlap(p, e)) {
       const stomp = p.vy > 0 && (p.y + p.h - p.vy) <= e.y + 12;
-      if (stomp) {
+      if (stomp && e.type === 'cat' && !e.angry) {
+        // první skok: kočka zaječí, na chvíli se omráčí a pak zuří (rychlejší)
+        e.angry = true; e.stun = 40;
+        p.vy = jumpHeld ? -10 : -7;
+        G.score += 100; popup(e.x - 4, e.y - 10, 'MŇAU!', '#ffb347'); sfx.meow();
+        puff(e.x + 15, e.y + 4, '#ff6a3d', 8);
+      } else if (stomp) {
         e.dead = true; e.timer = 30;
         p.vy = jumpHeld ? -10 : -7;
         G.score += 100; popup(e.x, e.y - 8, '+100'); sfx.stomp(); puff(e.x + 14, e.y + e.h, '#8b5a2b', 6);
+      } else if (e.stun > 0) {
+        // omráčená kočka neubližuje (druhý skok na ni ale zabije)
       } else if (p.wheels > 0) {
         e.dead = true; e.timer = 30;
         G.score += 100; popup(e.x, e.y - 8, '+100', '#ffb27a'); sfx.stomp(); puff(e.x + 14, e.y + e.h, '#8b5a2b', 8);
@@ -734,7 +749,79 @@ function drawDragon(cx, bottom, face, phase, airborne, vy, breath, scale = 1, bl
   ctx.restore();
 }
 
+function drawCat(e) {
+  const x = Math.round(e.x - G.cam), y = Math.round(e.y);
+  if (x < -50 || x > VW + 50) return;
+  ctx.save();
+  ctx.translate(x, y);
+  if (e.dead && e.shot) { ctx.translate(e.w / 2, e.h / 2); ctx.scale(1, -1); ctx.translate(-e.w / 2, -e.h / 2); }
+  const sy = (e.dead && !e.shot) ? 0.3 : (e.stun > 0 ? 0.6 : 1);
+  ctx.translate(0, e.h); ctx.scale(1, sy); ctx.translate(0, -e.h);
+  if (e.dir < 0) { ctx.translate(e.w, 0); ctx.scale(-1, 1); }
+  if (e.angry && !e.dead) ctx.translate(Math.sin(G.time * 1.6) * 0.8, 0);
+
+  const fur = e.angry ? '#e0552f' : '#e8913a';
+  const stripe = e.angry ? '#a8321a' : '#b86a1e';
+  const sw = Math.sin(e.anim * 2) * 3;
+
+  // ocas
+  ctx.strokeStyle = fur; ctx.lineWidth = 4; ctx.lineCap = 'round';
+  const wag = Math.sin(e.anim) * 3 + (e.angry ? -3 : 0);
+  ctx.beginPath(); ctx.moveTo(3, 15); ctx.quadraticCurveTo(-5, 11, -3 + wag, 1); ctx.stroke();
+  ctx.strokeStyle = stripe; ctx.lineWidth = 4;
+  ctx.beginPath(); ctx.moveTo(-3 + wag, 3); ctx.lineTo(-3 + wag, 1); ctx.stroke();
+
+  // nohy
+  ctx.fillStyle = stripe;
+  ctx.fillRect(5 + sw, 18, 4, 4); ctx.fillRect(16 - sw, 18, 4, 4);
+  ctx.fillStyle = fur;
+  ctx.fillRect(9 - sw, 18, 4, 4); ctx.fillRect(21 + sw, 18, 4, 4);
+
+  // tělo + pruhy + bříško
+  ctx.fillStyle = fur; ctx.beginPath(); ctx.ellipse(12, 14, 11, 7, 0, 0, 7); ctx.fill();
+  ctx.fillStyle = stripe;
+  for (let i = 0; i < 3; i++) ctx.fillRect(6 + i * 4, 7.5, 2, 4);
+  ctx.fillStyle = '#fff1d6'; ctx.beginPath(); ctx.ellipse(14, 19, 7, 2.5, 0, 0, 7); ctx.fill();
+
+  // hlava + uši
+  ctx.fillStyle = fur; ctx.beginPath(); ctx.arc(23, 10, 7, 0, 7); ctx.fill();
+  const earTilt = e.angry ? 2 : 0;
+  ctx.beginPath(); ctx.moveTo(17.5, 7); ctx.lineTo(18 + earTilt, -1 + earTilt); ctx.lineTo(23, 3.5); ctx.fill();
+  ctx.beginPath(); ctx.moveTo(23, 3.5); ctx.lineTo(28 - earTilt, -1 + earTilt); ctx.lineTo(29.5, 7); ctx.fill();
+  ctx.fillStyle = '#ff9aa8';
+  ctx.beginPath(); ctx.moveTo(19.3, 5.5); ctx.lineTo(19.2 + earTilt, 1.5 + earTilt); ctx.lineTo(21.8, 4); ctx.fill();
+  ctx.beginPath(); ctx.moveTo(24.2, 4); ctx.lineTo(26.8 - earTilt, 1.5 + earTilt); ctx.lineTo(27.7, 5.5); ctx.fill();
+
+  // oči
+  const xEyes = e.dead || e.stun > 0;
+  for (const ex of [21, 26.5]) {
+    if (xEyes) {
+      ctx.strokeStyle = '#2a1a0a'; ctx.lineWidth = 1.5;
+      ctx.beginPath(); ctx.moveTo(ex - 2, 7.5); ctx.lineTo(ex + 2, 11.5); ctx.moveTo(ex + 2, 7.5); ctx.lineTo(ex - 2, 11.5); ctx.stroke();
+    } else {
+      ctx.fillStyle = e.angry ? '#ff2a2a' : '#c8ff4a';
+      ctx.beginPath(); ctx.ellipse(ex, 9.5, 2.3, 2.8, 0, 0, 7); ctx.fill();
+      ctx.fillStyle = '#111'; ctx.fillRect(ex - 0.5, 7.5, 1, 4);
+    }
+  }
+  if (e.angry && !xEyes) {
+    ctx.strokeStyle = '#3a1000'; ctx.lineWidth = 1.6;
+    ctx.beginPath(); ctx.moveTo(18.5, 6.2); ctx.lineTo(23, 8.4); ctx.moveTo(29, 6.2); ctx.lineTo(24.6, 8.4); ctx.stroke();
+  }
+  // nos, tlama, vousy
+  ctx.fillStyle = '#ff7a8a'; ctx.beginPath(); ctx.moveTo(23, 12); ctx.lineTo(25.8, 12); ctx.lineTo(24.4, 13.8); ctx.fill();
+  ctx.strokeStyle = '#2a1a0a'; ctx.lineWidth = 0.9;
+  ctx.beginPath();
+  if (e.angry || e.stun > 0) { ctx.moveTo(22.2, 16.2); ctx.quadraticCurveTo(24.4, 14.2, 26.6, 16.2); }   // otevřená tlama
+  else { ctx.moveTo(22.5, 14.5); ctx.lineTo(24.4, 13.8); ctx.lineTo(26.3, 14.5); }
+  ctx.moveTo(26, 12.5); ctx.lineTo(32, 11); ctx.moveTo(26, 13.5); ctx.lineTo(32, 14.5);
+  ctx.moveTo(22.5, 12.5); ctx.lineTo(18.5, 11); ctx.moveTo(22.5, 13.5); ctx.lineTo(18.5, 14.5);
+  ctx.stroke();
+  ctx.restore();
+}
+
 function drawEnemy(e) {
+  if (e.type === 'cat') return drawCat(e);
   const x = Math.round(e.x - G.cam), y = Math.round(e.y);
   if (x < -40 || x > VW + 40) return;
   ctx.save();
@@ -836,6 +923,7 @@ function drawTitle() {
   if (Math.floor(G.time / 30) % 2 === 0) text('Stiskni ENTER nebo MEZERNÍK', VW / 2, 440, 24, '#fff', 'center');
   text('Sesbírej mince, přeskoč díry, zastav ohnivé houbičky – a doleť do cíle!', VW / 2, 200, 17, '#fff', 'center');
   text('Bonusy v blocích ?: oheň · létání · traktorová kola · truhlička', VW / 2, 228, 16, '#ffe066', 'center');
+  text('Pozor na kočky: po prvním skoku zuří, zabije je až druhý!', VW / 2, 254, 15, '#ffb27a', 'center');
 }
 
 function drawEnd(win) {
