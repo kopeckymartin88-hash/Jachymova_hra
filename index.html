@@ -1,0 +1,750 @@
+<!DOCTYPE html>
+<html lang="cs">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Dráček – plošinovka</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #14121f; color: #e8e6f0;
+    font-family: system-ui, -apple-system, "Segoe UI", sans-serif; }
+  body { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px; }
+  canvas { width: min(96vw, calc(96vh * 800 / 480 - 60px)); aspect-ratio: 800 / 480;
+    background: #87ceeb; border-radius: 8px; box-shadow: 0 8px 40px #0008; }
+  p { margin: 0; font-size: 14px; opacity: .75; text-align: center; padding: 0 12px; }
+  kbd { background: #2c2840; border-radius: 4px; padding: 1px 6px; font-size: 13px; }
+</style>
+</head>
+<body>
+<canvas id="game" width="800" height="480"></canvas>
+<p><kbd>←</kbd><kbd>→</kbd> / <kbd>A</kbd><kbd>D</kbd> chůze · <kbd>↑</kbd> / <kbd>W</kbd> / <kbd>Mezerník</kbd> skok ·
+   <kbd>Shift</kbd> / <kbd>F</kbd> oheň · <kbd>P</kbd> pauza · <kbd>M</kbd> zvuk</p>
+
+<script>
+"use strict";
+// ============================================================
+//  Základní konstanty
+// ============================================================
+const T = 32;                 // velikost dlaždice
+const VW = 800, VH = 480;     // velikost obrazovky
+const LW = 140, LH = 15;      // rozměry levelu v dlaždicích
+const GROUND_ROW = 13;
+
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d');
+
+// ============================================================
+//  Vstup
+// ============================================================
+const keys = {};
+let jumpBuf = 0;              // "zapamatovaný" stisk skoku
+let pressedEnter = false;
+const GAME_KEYS = new Set(['ArrowLeft','ArrowRight','ArrowUp','ArrowDown','Space']);
+
+addEventListener('keydown', e => {
+  if (GAME_KEYS.has(e.code)) e.preventDefault();
+  initAudio();
+  if (!e.repeat) {
+    if (e.code === 'ArrowUp' || e.code === 'KeyW' || e.code === 'Space') jumpBuf = 8;
+    if (e.code === 'Enter' || e.code === 'Space') pressedEnter = true;
+    if (e.code === 'KeyP' && G.state === 'play') G.paused = !G.paused;
+    if (e.code === 'KeyM') G.muted = !G.muted;
+  }
+  keys[e.code] = true;
+});
+addEventListener('keyup', e => { keys[e.code] = false; });
+addEventListener('blur', () => { for (const k in keys) keys[k] = false; if (G.state === 'play') G.paused = true; });
+
+// ============================================================
+//  Zvuk (Web Audio, žádné soubory)
+// ============================================================
+let AC = null;
+function initAudio() {
+  if (!AC) { try { AC = new (window.AudioContext || window.webkitAudioContext)(); } catch (e) {} }
+  if (AC && AC.state === 'suspended') AC.resume();
+}
+function beep(freq, dur, type = 'square', slide = 0, vol = 0.05, delay = 0) {
+  if (!AC || G.muted) return;
+  const t0 = AC.currentTime + delay;
+  const o = AC.createOscillator(), g = AC.createGain();
+  o.type = type;
+  o.frequency.setValueAtTime(freq, t0);
+  if (slide) o.frequency.exponentialRampToValueAtTime(Math.max(30, freq + slide), t0 + dur);
+  g.gain.setValueAtTime(vol, t0);
+  g.gain.exponentialRampToValueAtTime(0.0001, t0 + dur);
+  o.connect(g); g.connect(AC.destination);
+  o.start(t0); o.stop(t0 + dur);
+}
+const sfx = {
+  jump:  () => beep(320, 0.18, 'square', 380),
+  coin:  () => { beep(988, 0.07, 'square', 0, 0.05); beep(1319, 0.18, 'square', 0, 0.05, 0.07); },
+  stomp: () => beep(220, 0.12, 'square', -120, 0.07),
+  fire:  () => beep(500, 0.22, 'sawtooth', -380, 0.05),
+  kill:  () => beep(300, 0.2, 'triangle', -200, 0.07),
+  hurt:  () => beep(200, 0.4, 'sawtooth', -150, 0.07),
+  bump:  () => beep(150, 0.08, 'square', 0, 0.05),
+  win:   () => [523, 659, 784, 1047].forEach((f, i) => beep(f, 0.2, 'square', 0, 0.05, i * 0.13)),
+  over:  () => [392, 330, 262, 196].forEach((f, i) => beep(f, 0.3, 'triangle', 0, 0.07, i * 0.2)),
+  check: () => { beep(660, 0.1, 'square'); beep(880, 0.2, 'square', 0, 0.05, 0.1); },
+};
+
+// ============================================================
+//  Stav hry
+// ============================================================
+const G = { state: 'title', paused: false, muted: false, score: 0, coins: 0, lives: 3, time: 0, cam: 0 };
+let grid, coinsList, enemies, fireballs, particles, bumps, P, checkpoint;
+
+// ============================================================
+//  Level (sestavený programově)
+// ============================================================
+function buildLevel() {
+  grid = Array.from({ length: LH }, () => Array(LW).fill(' '));
+  coinsList = []; enemies = []; fireballs = []; particles = []; bumps = {};
+
+  const set = (x, y, t) => { if (x >= 0 && x < LW && y >= 0 && y < LH) grid[y][x] = t; };
+  const ground = (x1, x2) => { for (let x = x1; x <= x2; x++) { set(x, 13, '#'); set(x, 14, '#'); } };
+  const row = (x, y, n, t = 'B') => { for (let i = 0; i < n; i++) set(x + i, y, t); };
+  const pipe = (x, h) => { for (let i = 0; i < h; i++) { set(x, 13 - 1 - i, 'T'); set(x + 1, 13 - 1 - i, 'T'); } };
+  const coin = (x, y) => coinsList.push({ x: x * T + 8, y: y * T + 6, w: 16, h: 20, got: false });
+  const coinRow = (x, y, n) => { for (let i = 0; i < n; i++) coin(x + i, y); };
+  const enemy = (x, dir = -1) => enemies.push({ x: x * T + 2, y: GROUND_ROW * T - 26, w: 28, h: 26,
+      vx: 0, vy: 0, dir, dead: false, timer: 0, anim: Math.random() * 6 });
+
+  // Země s dírami
+  [[0, 27], [30, 49], [53, 77], [81, 99], [103, 139]].forEach(([a, b]) => ground(a, b));
+
+  // Úsek 1: první bloky
+  row(9, 9, 1); set(10, 9, '?'); row(11, 9, 1); set(12, 9, '?'); row(13, 9, 1);
+  set(11, 5, '?');
+  coinRow(15, 11, 3);
+  row(20, 9, 4); coinRow(20, 8, 4);
+  // oblouk coinů nad první dírou
+  coin(27, 10); coin(28, 9); coin(29, 9); coin(30, 10);
+
+  // Úsek 2: roury a plošiny
+  row(36, 10, 5); set(38, 10, '?'); coinRow(36, 9, 5);
+  pipe(44, 2);
+  pipe(48, 3);
+  coinRow(52, 9, 1); coin(51, 10); coin(53, 10);       // nad další dírou
+
+  // Úsek 3: vysoká cesta
+  row(56, 9, 3); row(61, 7, 3); row(66, 9, 3);
+  coinRow(56, 8, 3); coinRow(61, 6, 3); coinRow(66, 8, 3);
+  set(62, 7, '?');
+  pipe(72, 1);
+  coinRow(74, 11, 3);
+
+  // Úsek 4: schody dolů a díra
+  row(79, 10, 2); coin(79, 9); coin(80, 9);
+  row(84, 9, 1); set(85, 9, '?'); row(86, 9, 1); set(85, 5, '?');
+  row(90, 10, 5); coinRow(90, 9, 5);
+  pipe(96, 2);
+  coin(101, 9); coin(102, 10);
+
+  // Úsek 5: finále + schody
+  row(106, 9, 3); coinRow(106, 8, 3);
+  row(112, 9, 1); set(113, 9, '?'); row(114, 9, 1);
+  pipe(117, 2);
+  for (let i = 0; i < 8; i++) for (let j = 0; j <= i; j++) set(123 + i, 12 - j, '#');
+  coinRow(121, 11, 1);
+
+  // Nepřátelé
+  [16, 24, 34, 40, 46, 57, 63, 69, 75, 86, 92, 94, 108, 111, 115, 119].forEach((x, i) => enemy(x, i % 2 ? 1 : -1));
+  // nepřátelé na vysokých plošinách
+  enemies.push({ x: 90 * T, y: 10 * T - 26, w: 28, h: 26, vx: 0, vy: 0, dir: 1, dead: false, timer: 0, anim: 0 });
+  enemies.push({ x: 36 * T, y: 10 * T - 26, w: 28, h: 26, vx: 0, vy: 0, dir: 1, dead: false, timer: 0, anim: 0 });
+
+  checkpoint = { x: 66 * T, reached: false, spawnX: 64 * T };
+}
+function flagX() { return 134 * T; }
+
+function newPlayer(x) {
+  return { x, y: GROUND_ROW * T - 28, w: 24, h: 28, vx: 0, vy: 0, face: 1, ground: false,
+           coyote: 0, invuln: 0, fireCd: 0, breath: 0, anim: 0 };
+}
+function newGame() {
+  G.score = 0; G.coins = 0; G.lives = 3; G.time = 0; G.paused = false;
+  buildLevel();
+  P = newPlayer(2 * T);
+  G.cam = 0;
+  G.state = 'play';
+}
+
+// ============================================================
+//  Fyzika a kolize
+// ============================================================
+function solidAt(tx, ty) {
+  if (tx < 0 || tx >= LW) return true;
+  if (ty < 0 || ty >= LH) return false;
+  const t = grid[ty][tx];
+  return t === '#' || t === 'B' || t === '?' || t === 'U' || t === 'T';
+}
+
+function moveBody(b) {
+  const res = { hitX: false, ground: false, bumps: [] };
+  // vodorovně
+  b.x += b.vx;
+  let y0 = Math.floor(b.y / T), y1 = Math.floor((b.y + b.h - 0.01) / T);
+  if (b.vx > 0) {
+    const tx = Math.floor((b.x + b.w - 0.01) / T);
+    for (let ty = y0; ty <= y1; ty++) if (solidAt(tx, ty)) { b.x = tx * T - b.w; b.vx = 0; res.hitX = true; break; }
+  } else if (b.vx < 0) {
+    const tx = Math.floor(b.x / T);
+    for (let ty = y0; ty <= y1; ty++) if (solidAt(tx, ty)) { b.x = (tx + 1) * T; b.vx = 0; res.hitX = true; break; }
+  }
+  // svisle
+  b.y += b.vy;
+  const x0 = Math.floor(b.x / T), x1 = Math.floor((b.x + b.w - 0.01) / T);
+  if (b.vy > 0) {
+    const ty = Math.floor((b.y + b.h - 0.01) / T);
+    for (let tx = x0; tx <= x1; tx++) if (solidAt(tx, ty)) { b.y = ty * T - b.h; b.vy = 0; res.ground = true; break; }
+  } else if (b.vy < 0) {
+    const ty = Math.floor(b.y / T);
+    let hit = false;
+    for (let tx = x0; tx <= x1; tx++) if (solidAt(tx, ty)) { res.bumps.push({ tx, ty }); hit = true; }
+    if (hit) { b.y = (ty + 1) * T; b.vy = 0; }
+  }
+  return res;
+}
+
+const overlap = (a, b) => a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y;
+const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+
+function popup(x, y, text, color = '#fff') {
+  particles.push({ x, y, vx: 0, vy: -1.1, life: 40, text, color });
+}
+function puff(x, y, color, n = 6) {
+  for (let i = 0; i < n; i++)
+    particles.push({ x, y, vx: (Math.random() - .5) * 4, vy: -Math.random() * 3, life: 25, r: 2 + Math.random() * 3, color });
+}
+
+// ============================================================
+//  Aktualizace
+// ============================================================
+function loseLife(fell) {
+  G.lives--;
+  sfx.hurt();
+  if (G.lives <= 0) { G.state = 'over'; sfx.over(); return; }
+  if (fell) {
+    const sx = checkpoint.reached ? checkpoint.spawnX : 2 * T;
+    P = newPlayer(sx);
+    P.invuln = 90;
+  } else {
+    P.invuln = 120; P.vy = -6; P.vx = -P.face * 4;
+  }
+}
+
+function updatePlay() {
+  const p = P;
+  G.time++;
+  const left = keys.ArrowLeft || keys.KeyA, right = keys.ArrowRight || keys.KeyD;
+  const dir = (right ? 1 : 0) - (left ? 1 : 0);
+  const jumpHeld = keys.ArrowUp || keys.KeyW || keys.Space;
+  const fireKey = keys.ShiftLeft || keys.ShiftRight || keys.KeyF || keys.KeyX;
+
+  // chůze
+  const maxV = 3.3, accel = 0.5, fric = 0.4;
+  if (p.invuln < 105 || p.vy >= 0 || true) {
+    if (dir) { p.vx = clamp(p.vx + dir * accel * (p.ground ? 1 : 0.85), -maxV, maxV); p.face = dir; }
+    else if (Math.abs(p.vx) < fric) p.vx = 0;
+    else p.vx -= Math.sign(p.vx) * fric * (p.ground ? 1 : 0.25);
+  }
+
+  // skok (coyote time + buffer)
+  p.coyote = p.ground ? 6 : p.coyote - 1;
+  if (jumpBuf > 0) jumpBuf--;
+  if (jumpBuf > 0 && p.coyote > 0) { p.vy = -11; p.coyote = 0; jumpBuf = 0; p.ground = false; sfx.jump(); }
+
+  // gravitace (kratší skok při puštění klávesy)
+  const g = (p.vy < 0 && !jumpHeld) ? 1.3 : 0.5;
+  p.vy = Math.min(p.vy + g, 12);
+
+  const res = moveBody(p);
+  p.ground = res.ground;
+  if (Math.abs(p.vx) > 0.1 && p.ground) p.anim += Math.abs(p.vx) * 0.12;
+
+  // hlavou do bloku
+  if (res.bumps.length) {
+    const cx = p.x + p.w / 2;
+    res.bumps.sort((a, b) => Math.abs(a.tx * T + 16 - cx) - Math.abs(b.tx * T + 16 - cx));
+    const { tx, ty } = res.bumps[0];
+    const t = grid[ty][tx];
+    if (t === '?' || t === 'B') {
+      bumps[tx + ',' + ty] = 10;
+      if (t === '?') {
+        grid[ty][tx] = 'U'; G.coins++; G.score += 100;
+        popup(tx * T + 8, ty * T - 6, '+100', '#ffe066'); sfx.coin();
+        puff(tx * T + 16, ty * T, '#ffd93b', 5);
+      } else sfx.bump();
+    }
+  }
+
+  // oheň
+  if (p.fireCd > 0) p.fireCd--;
+  if (p.breath > 0) p.breath--;
+  if (fireKey && p.fireCd <= 0) {
+    fireballs.push({ x: p.x + (p.face > 0 ? p.w : -10), y: p.y + 6, w: 10, h: 10, vx: p.face * 6 + p.vx * 0.3, vy: 0, life: 110 });
+    p.fireCd = 22; p.breath = 10; sfx.fire();
+  }
+  if (p.invuln > 0) p.invuln--;
+
+  // ohňové koule
+  for (const f of fireballs) {
+    f.vy = Math.min(f.vy + 0.4, 8);
+    const r = moveBody(f);
+    if (r.ground) f.vy = -5;
+    if (r.hitX) f.life = 0;
+    f.life--;
+    for (const e of enemies) {
+      if (!e.dead && overlap(f, e)) {
+        e.dead = true; e.timer = 40; e.shot = true; e.vy = -5; f.life = 0;
+        G.score += 200; popup(e.x, e.y - 8, '+200', '#ff9f43'); sfx.kill(); puff(e.x + 14, e.y + 10, '#ff7a1a', 8);
+      }
+    }
+    if (f.y > LH * T) f.life = 0;
+  }
+  fireballs = fireballs.filter(f => f.life > 0);
+
+  // nepřátelé
+  const camL = G.cam - 100, camR = G.cam + VW + 100;
+  for (const e of enemies) {
+    if (e.dead) {
+      e.timer--;
+      if (e.shot) { e.vy += 0.5; e.y += e.vy; e.x += e.dir * 1.5; }
+      continue;
+    }
+    if (e.x + e.w < camL || e.x > camR) continue;       // mimo dosah
+    e.anim += 0.12;
+    e.vx = e.dir * 0.9;
+    e.vy = Math.min(e.vy + 0.5, 10);
+    const r = moveBody(e);
+    if (r.hitX) e.dir *= -1;
+    if (r.ground) {
+      const tx = Math.floor((e.x + (e.dir > 0 ? e.w + 2 : -2)) / T);
+      const ty = Math.floor((e.y + e.h + 2) / T);
+      if (!solidAt(tx, ty)) e.dir *= -1;
+    }
+    if (e.y > LH * T + 100) { e.dead = true; e.timer = 0; }
+
+    if (overlap(p, e)) {
+      const stomp = p.vy > 0 && (p.y + p.h - p.vy) <= e.y + 12;
+      if (stomp) {
+        e.dead = true; e.timer = 30;
+        p.vy = jumpHeld ? -10 : -7;
+        G.score += 100; popup(e.x, e.y - 8, '+100'); sfx.stomp(); puff(e.x + 14, e.y + e.h, '#8b5a2b', 6);
+      } else if (p.invuln <= 0) {
+        loseLife(false);
+        if (G.state !== 'play') return;
+      }
+    }
+  }
+  enemies = enemies.filter(e => !(e.dead && e.timer <= 0));
+
+  // mince
+  for (const c of coinsList) {
+    if (!c.got && overlap(p, c)) {
+      c.got = true; G.coins++; G.score += 50; sfx.coin();
+      popup(c.x, c.y - 4, '+50', '#ffe066');
+    }
+  }
+
+  // checkpoint
+  if (!checkpoint.reached && p.x > checkpoint.x) {
+    checkpoint.reached = true; sfx.check(); popup(p.x, p.y - 20, 'Checkpoint!', '#7dffb0');
+  }
+
+  // pád do díry
+  if (p.y > LH * T + 60) loseLife(true);
+
+  // cíl
+  if (G.state === 'play' && p.x + p.w > flagX()) {
+    G.score += G.lives * 500; G.state = 'win'; sfx.win();
+  }
+
+  // částice
+  for (const q of particles) {
+    q.x += q.vx; q.y += q.vy; if (!q.text) q.vy += 0.25; q.life--;
+  }
+  particles = particles.filter(q => q.life > 0);
+  for (const k in bumps) { bumps[k]--; if (bumps[k] <= 0) delete bumps[k]; }
+
+  // kamera
+  const target = clamp(p.x - VW * 0.4, 0, LW * T - VW);
+  G.cam += (target - G.cam) * 0.15;
+}
+
+// ============================================================
+//  Kreslení – prostředí
+// ============================================================
+function drawBackground() {
+  const g = ctx.createLinearGradient(0, 0, 0, VH);
+  g.addColorStop(0, '#5aa9e6'); g.addColorStop(1, '#bfe6ff');
+  ctx.fillStyle = g; ctx.fillRect(0, 0, VW, VH);
+
+  // slunce
+  ctx.fillStyle = '#fff3b0'; ctx.beginPath(); ctx.arc(680, 80, 38, 0, 7); ctx.fill();
+  ctx.fillStyle = '#fff9d6'; ctx.beginPath(); ctx.arc(680, 80, 28, 0, 7); ctx.fill();
+
+  // mraky (paralaxa)
+  ctx.fillStyle = 'rgba(255,255,255,.9)';
+  for (let i = 0; i < 12; i++) {
+    const x = ((i * 330 - G.cam * 0.4) % (12 * 330) + 12 * 330) % (12 * 330) - 150;
+    const y = 40 + (i * 53) % 110;
+    ctx.beginPath();
+    ctx.arc(x, y, 20, 0, 7); ctx.arc(x + 24, y - 8, 26, 0, 7); ctx.arc(x + 52, y, 20, 0, 7);
+    ctx.fill();
+  }
+  // kopce (paralaxa)
+  const layers = [[0.2, '#7fc79a', 150, 260], [0.35, '#5fb37c', 110, 200]];
+  for (const [k, col, hgt, w] of layers) {
+    ctx.fillStyle = col;
+    const off = -((G.cam * k) % w) - w;
+    for (let x = off; x < VW + w; x += w) {
+      ctx.beginPath();
+      ctx.ellipse(x + w / 2, GROUND_ROW * T + 2, w / 2, hgt, 0, Math.PI, 0);
+      ctx.fill();
+    }
+  }
+}
+
+function drawTiles() {
+  const x0 = Math.floor(G.cam / T), x1 = x0 + Math.ceil(VW / T) + 1;
+  for (let ty = 0; ty < LH; ty++) {
+    for (let tx = x0; tx <= x1; tx++) {
+      if (tx < 0 || tx >= LW) continue;
+      const t = grid[ty][tx];
+      if (t === ' ') continue;
+      const px = Math.round(tx * T - G.cam);
+      let py = ty * T;
+      const b = bumps[tx + ',' + ty];
+      if (b) py -= Math.sin((b / 10) * Math.PI) * 7;
+
+      if (t === '#') {
+        ctx.fillStyle = '#8a5a34'; ctx.fillRect(px, py, T, T);
+        ctx.fillStyle = '#6f4528';
+        ctx.fillRect(px + 6, py + 12, 4, 4); ctx.fillRect(px + 20, py + 22, 5, 4); ctx.fillRect(px + 14, py + 6, 3, 3);
+        if (!solidAt(tx, ty - 1) || grid[ty - 1]?.[tx] === ' ') {
+          ctx.fillStyle = '#4caf50'; ctx.fillRect(px, py, T, 9);
+          ctx.fillStyle = '#6fd16c'; ctx.fillRect(px, py, T, 3);
+          ctx.fillStyle = '#4caf50';
+          for (let i = 0; i < 4; i++) ctx.fillRect(px + i * 8 + 2, py + 9, 4, 4);
+        }
+      } else if (t === 'B') {
+        ctx.fillStyle = '#c8693a'; ctx.fillRect(px, py, T, T);
+        ctx.fillStyle = '#8f4624';
+        ctx.fillRect(px, py + 15, T, 2); ctx.fillRect(px, py, T, 2); ctx.fillRect(px, py + T - 2, T, 2);
+        ctx.fillRect(px + 15, py, 2, 16); ctx.fillRect(px + 7, py + 16, 2, 16); ctx.fillRect(px + 23, py + 16, 2, 16);
+        ctx.fillStyle = '#e08a58'; ctx.fillRect(px + 2, py + 2, 12, 2);
+      } else if (t === '?') {
+        ctx.fillStyle = '#e8a90c'; ctx.fillRect(px, py, T, T);
+        ctx.fillStyle = '#ffd93b'; ctx.fillRect(px + 2, py + 2, T - 4, T - 4);
+        ctx.fillStyle = '#b57d00';
+        [[3, 3], [T - 6, 3], [3, T - 6], [T - 6, T - 6]].forEach(([a, c]) => ctx.fillRect(px + a, py + c, 3, 3));
+        ctx.fillStyle = '#8a5a00'; ctx.font = 'bold 22px system-ui'; ctx.textAlign = 'center';
+        ctx.fillText('?', px + 16, py + 24);
+      } else if (t === 'U') {
+        ctx.fillStyle = '#8d7b68'; ctx.fillRect(px, py, T, T);
+        ctx.fillStyle = '#6e5f4f'; ctx.fillRect(px + 3, py + 3, T - 6, T - 6);
+        ctx.fillStyle = '#8d7b68'; ctx.fillRect(px + 5, py + 5, T - 10, T - 10);
+      } else if (t === 'T') {
+        const cap = grid[ty - 1]?.[tx] !== 'T';
+        const leftEdge = grid[ty][tx - 1] !== 'T';
+        ctx.fillStyle = '#2e9e4f'; ctx.fillRect(px, py, T, T);
+        ctx.fillStyle = '#4fd070'; ctx.fillRect(px + (leftEdge ? 5 : 0), py, 5, T);
+        ctx.fillStyle = '#1f7a3a'; ctx.fillRect(px + (leftEdge ? 0 : T - 4), py, 4, T);
+        if (cap) {
+          ctx.fillStyle = '#1f7a3a'; ctx.fillRect(px - (leftEdge ? 2 : 0), py, T + (leftEdge ? 0 : 2), 12);
+          ctx.fillStyle = '#2e9e4f'; ctx.fillRect(px + 1 - (leftEdge ? 1 : 0), py + 2, T - 2 + (leftEdge ? 0 : 1), 8);
+          ctx.fillStyle = '#4fd070'; ctx.fillRect(px + (leftEdge ? 4 : 0), py + 2, 5, 8);
+        }
+      }
+    }
+  }
+}
+
+function drawCoins() {
+  const t = G.time;
+  for (const c of coinsList) {
+    if (c.got) continue;
+    const sx = c.x - G.cam;
+    if (sx < -30 || sx > VW + 30) continue;
+    const w = Math.abs(Math.cos(t * 0.07 + c.x * 0.05)) * 7 + 2;
+    ctx.fillStyle = '#c99700';
+    ctx.beginPath(); ctx.ellipse(sx + 8, c.y + 10, w + 1.5, 10.5, 0, 0, 7); ctx.fill();
+    ctx.fillStyle = '#ffd93b';
+    ctx.beginPath(); ctx.ellipse(sx + 8, c.y + 10, w, 9, 0, 0, 7); ctx.fill();
+    ctx.fillStyle = '#fff3a0'; ctx.fillRect(sx + 8 - w / 3, c.y + 5, Math.max(1, w / 3), 8);
+  }
+}
+
+function drawFlags() {
+  // checkpoint
+  const cx = checkpoint.x - G.cam;
+  ctx.fillStyle = '#777'; ctx.fillRect(cx, 9 * T + 8, 4, 4 * T - 8 - 0);
+  ctx.fillStyle = checkpoint.reached ? '#38d27a' : '#ff6b6b';
+  ctx.beginPath(); ctx.moveTo(cx + 4, 9 * T + 8); ctx.lineTo(cx + 30, 9 * T + 20); ctx.lineTo(cx + 4, 9 * T + 32); ctx.fill();
+
+  // cíl
+  const fx = flagX() - G.cam;
+  ctx.fillStyle = '#e8e8e8'; ctx.fillRect(fx + 14, 3 * T, 5, 10 * T);
+  ctx.fillStyle = '#ffd93b'; ctx.beginPath(); ctx.arc(fx + 16.5, 3 * T - 4, 7, 0, 7); ctx.fill();
+  const wave = Math.sin(G.time * 0.1) * 3;
+  ctx.fillStyle = '#e63946';
+  ctx.beginPath();
+  ctx.moveTo(fx + 19, 3 * T + 4);
+  ctx.quadraticCurveTo(fx + 40, 3 * T + 8 + wave, fx + 62, 3 * T + 22 + wave);
+  ctx.quadraticCurveTo(fx + 40, 3 * T + 30 - wave, fx + 19, 3 * T + 40);
+  ctx.fill();
+  ctx.fillStyle = '#fff'; ctx.font = 'bold 14px system-ui'; ctx.textAlign = 'left';
+  ctx.fillText('CÍL', fx + 26, 3 * T + 26);
+}
+
+// ============================================================
+//  Kreslení – postavy
+// ============================================================
+function drawDragon(cx, bottom, face, phase, airborne, vy, breath, scale = 1, blink = false) {
+  ctx.save();
+  ctx.translate(cx, bottom);
+  ctx.scale(face * scale, scale);
+
+  const green = '#3cb44b', dark = '#2a8f39', belly = '#f6e58d', accent = '#ff8c42';
+  const legSwing = airborne ? 0 : Math.sin(phase * 2) * 4;
+
+  // ocas
+  ctx.fillStyle = green;
+  ctx.beginPath();
+  ctx.moveTo(-8, -10);
+  ctx.quadraticCurveTo(-20, -4 + Math.sin(phase) * 2, -24, -13);
+  ctx.quadraticCurveTo(-16, -9, -6, -16);
+  ctx.fill();
+  ctx.fillStyle = accent;
+  ctx.beginPath(); ctx.moveTo(-24, -13); ctx.lineTo(-27, -19); ctx.lineTo(-20, -15); ctx.fill();
+
+  // křídlo (za tělem)
+  const flap = airborne ? (vy < 0 ? -1 : 0.4) : Math.sin(phase * 0.6) * 0.15;
+  ctx.fillStyle = '#7fd68b';
+  ctx.beginPath();
+  ctx.moveTo(-4, -17);
+  ctx.lineTo(-17, -29 - flap * 8);
+  ctx.lineTo(-10, -20 - flap * 4);
+  ctx.lineTo(-4, -27 - flap * 8);
+  ctx.lineTo(0, -16);
+  ctx.fill();
+  ctx.fillStyle = dark;
+  ctx.fillRect(-4, -19, 3, 3);
+
+  // zadní nohy
+  ctx.fillStyle = dark;
+  ctx.beginPath(); ctx.ellipse(-4 + legSwing, -3, 5, 3.4, 0, 0, 7); ctx.fill();
+  ctx.fillStyle = green;
+  ctx.beginPath(); ctx.ellipse(6 - legSwing, -3, 5.5, 3.6, 0, 0, 7); ctx.fill();
+
+  // tělo + bříško
+  ctx.fillStyle = green;
+  ctx.beginPath(); ctx.ellipse(0, -13, 11, 11, 0, 0, 7); ctx.fill();
+  ctx.fillStyle = belly;
+  ctx.beginPath(); ctx.ellipse(3, -11, 6.5, 8.5, 0, 0, 7); ctx.fill();
+  ctx.strokeStyle = '#d9c46a'; ctx.lineWidth = 1;
+  for (let i = 0; i < 3; i++) { ctx.beginPath(); ctx.moveTo(0, -16 + i * 4); ctx.lineTo(7, -16 + i * 4); ctx.stroke(); }
+
+  // hřbetní ostny
+  ctx.fillStyle = accent;
+  for (let i = 0; i < 3; i++) {
+    const x = -10 + i * 0.5 - i * 1.5, y = -17 - i * 4;
+    ctx.beginPath(); ctx.moveTo(x - 2, y + 4); ctx.lineTo(x - 6, y); ctx.lineTo(x, y - 2); ctx.fill();
+  }
+
+  // ručička
+  ctx.fillStyle = green;
+  ctx.beginPath(); ctx.ellipse(8, -11, 3, 2.4, 0.4, 0, 7); ctx.fill();
+
+  // hlava
+  ctx.fillStyle = green;
+  ctx.beginPath(); ctx.arc(5, -22, 8.5, 0, 7); ctx.fill();
+  ctx.beginPath(); ctx.ellipse(13, -20, 6.5, 5, 0, 0, 7); ctx.fill();   // čumák
+  ctx.fillStyle = dark;
+  ctx.beginPath(); ctx.arc(16, -22, 1, 0, 7); ctx.fill();                 // nozdra
+  // rohy
+  ctx.fillStyle = accent;
+  ctx.beginPath(); ctx.moveTo(0, -28); ctx.lineTo(-3, -35); ctx.lineTo(4, -29); ctx.fill();
+  ctx.beginPath(); ctx.moveTo(5, -30); ctx.lineTo(5, -37); ctx.lineTo(10, -29); ctx.fill();
+  // oko
+  if (blink) {
+    ctx.strokeStyle = '#123'; ctx.lineWidth = 1.6;
+    ctx.beginPath(); ctx.moveTo(5, -23); ctx.lineTo(11, -23); ctx.stroke();
+  } else {
+    ctx.fillStyle = '#fff'; ctx.beginPath(); ctx.arc(8, -24, 3.6, 0, 7); ctx.fill();
+    ctx.fillStyle = '#112'; ctx.beginPath(); ctx.arc(9.4, -24, 1.9, 0, 7); ctx.fill();
+    ctx.fillStyle = '#fff'; ctx.fillRect(9.6, -25.4, 1, 1);
+  }
+  // tvářička
+  ctx.fillStyle = 'rgba(255,120,120,.55)';
+  ctx.beginPath(); ctx.arc(7, -18, 2.2, 0, 7); ctx.fill();
+
+  // oheň z tlamy
+  if (breath > 0) {
+    const s = breath / 10;
+    ctx.fillStyle = '#ff5a1f';
+    ctx.beginPath(); ctx.moveTo(19, -20); ctx.lineTo(19 + 14 * s, -26); ctx.lineTo(19 + 20 * s, -20); ctx.lineTo(19 + 14 * s, -15); ctx.fill();
+    ctx.fillStyle = '#ffd93b';
+    ctx.beginPath(); ctx.moveTo(19, -20); ctx.lineTo(19 + 9 * s, -23); ctx.lineTo(19 + 12 * s, -20); ctx.lineTo(19 + 9 * s, -17); ctx.fill();
+  }
+  ctx.restore();
+}
+
+function drawEnemy(e) {
+  const x = Math.round(e.x - G.cam), y = Math.round(e.y);
+  if (x < -40 || x > VW + 40) return;
+  ctx.save();
+  if (e.dead && e.shot) {
+    ctx.translate(x + e.w / 2, y + e.h / 2); ctx.scale(1, -1); ctx.translate(-e.w / 2, -e.h / 2);
+  } else ctx.translate(x, y);
+
+  const squish = e.dead && !e.shot;
+  const h = squish ? 9 : e.h;
+  const top = e.h - h;
+  // tělo houbičky
+  ctx.fillStyle = '#a0522d';
+  ctx.beginPath();
+  if (squish) ctx.ellipse(14, e.h - 4, 14, 5, 0, 0, 7);
+  else { ctx.ellipse(14, 12, 14, 12, 0, Math.PI, 0); ctx.lineTo(28, 16); ctx.lineTo(0, 16); }
+  ctx.fill();
+  if (!squish) {
+    ctx.fillStyle = '#e9c9a0'; ctx.fillRect(7, 15, 14, 7);               // nožka
+    ctx.fillStyle = '#4a2a14';
+    const step = Math.sin(e.anim * 2) * 3;
+    ctx.beginPath(); ctx.ellipse(8 + step, 24, 6, 3, 0, 0, 7); ctx.fill();
+    ctx.beginPath(); ctx.ellipse(20 - step, 24, 6, 3, 0, 0, 7); ctx.fill();
+    // tečky
+    ctx.fillStyle = '#c47a4b'; ctx.beginPath(); ctx.arc(8, 6, 2.5, 0, 7); ctx.arc(20, 5, 2, 0, 7); ctx.fill();
+    // oči
+    ctx.fillStyle = '#fff'; ctx.fillRect(6, 11, 7, 7); ctx.fillRect(15, 11, 7, 7);
+    ctx.fillStyle = '#000'; ctx.fillRect(9 + e.dir, 14, 3, 4); ctx.fillRect(16 + e.dir, 14, 3, 4);
+    ctx.strokeStyle = '#000'; ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.moveTo(5, 9); ctx.lineTo(13, 12); ctx.moveTo(23, 9); ctx.lineTo(15, 12); ctx.stroke();
+  }
+  ctx.restore();
+}
+
+function drawFireballs() {
+  for (const f of fireballs) {
+    const x = f.x - G.cam + 5, y = f.y + 5;
+    const r = 6 + Math.sin(G.time * 0.8) * 1;
+    ctx.fillStyle = 'rgba(255,90,30,.35)'; ctx.beginPath(); ctx.arc(x, y, r + 4, 0, 7); ctx.fill();
+    ctx.fillStyle = '#ff5a1f'; ctx.beginPath(); ctx.arc(x, y, r, 0, 7); ctx.fill();
+    ctx.fillStyle = '#ffd93b'; ctx.beginPath(); ctx.arc(x, y, r * 0.55, 0, 7); ctx.fill();
+  }
+}
+
+function drawParticles() {
+  for (const q of particles) {
+    const a = Math.min(1, q.life / 15);
+    ctx.globalAlpha = a;
+    if (q.text) {
+      ctx.fillStyle = q.color; ctx.font = 'bold 15px system-ui'; ctx.textAlign = 'left';
+      ctx.strokeStyle = 'rgba(0,0,0,.6)'; ctx.lineWidth = 3;
+      ctx.strokeText(q.text, q.x - G.cam, q.y); ctx.fillText(q.text, q.x - G.cam, q.y);
+    } else {
+      ctx.fillStyle = q.color; ctx.beginPath(); ctx.arc(q.x - G.cam, q.y, q.r, 0, 7); ctx.fill();
+    }
+  }
+  ctx.globalAlpha = 1;
+}
+
+// ============================================================
+//  HUD a obrazovky
+// ============================================================
+function text(str, x, y, size, color = '#fff', align = 'left', stroke = true) {
+  ctx.font = `bold ${size}px system-ui, sans-serif`; ctx.textAlign = align;
+  if (stroke) { ctx.strokeStyle = 'rgba(0,0,0,.55)'; ctx.lineWidth = 4; ctx.lineJoin = 'round'; ctx.strokeText(str, x, y); }
+  ctx.fillStyle = color; ctx.fillText(str, x, y);
+}
+
+function drawHUD() {
+  for (let i = 0; i < 3; i++) text(i < G.lives ? '♥' : '♡', 16 + i * 26, 32, 26, i < G.lives ? '#ff4d6d' : '#ffffff99');
+  ctx.fillStyle = '#ffd93b'; ctx.beginPath(); ctx.arc(26, 58, 8, 0, 7); ctx.fill();
+  ctx.fillStyle = '#c99700'; ctx.fillRect(24, 52, 3, 12);
+  text('× ' + G.coins, 42, 65, 18);
+  text('SKÓRE ' + String(G.score).padStart(6, '0'), VW - 16, 32, 22, '#fff', 'right');
+  if (G.muted) text('🔇', VW - 16, 58, 16, '#fff', 'right');
+}
+
+function overlay(alpha = 0.55) { ctx.fillStyle = `rgba(10,8,25,${alpha})`; ctx.fillRect(0, 0, VW, VH); }
+
+function drawTitle() {
+  drawBackground();
+  // ozdobná zem
+  ctx.fillStyle = '#4caf50'; ctx.fillRect(0, 400, VW, 14);
+  ctx.fillStyle = '#8a5a34'; ctx.fillRect(0, 414, VW, 70);
+  overlay(0.25);
+  text('DRÁČEK', VW / 2, 120, 76, '#ffd93b', 'center');
+  text('plošinovka', VW / 2, 158, 26, '#fff', 'center');
+  drawDragon(VW / 2, 400, 1, G.time * 0.1, false, 0, (G.time % 120) < 10 ? 10 - (G.time % 120) : 0, 3.2, (G.time % 150) > 140);
+  if (Math.floor(G.time / 30) % 2 === 0) text('Stiskni ENTER nebo MEZERNÍK', VW / 2, 440, 24, '#fff', 'center');
+  text('Sesbírej mince, přeskoč díry, zastav ohnivé houbičky – a doleť do cíle!', VW / 2, 200, 17, '#fff', 'center');
+}
+
+function drawEnd(win) {
+  overlay(0.6);
+  if (win) {
+    text('VYHRÁL JSI! 🐉🔥', VW / 2, 190, 56, '#ffd93b', 'center');
+    text('Skóre: ' + G.score + '   (bonus za životy: ' + (G.lives * 500) + ')', VW / 2, 245, 24, '#fff', 'center');
+  } else {
+    text('KONEC HRY', VW / 2, 190, 60, '#ff6b6b', 'center');
+    text('Skóre: ' + G.score, VW / 2, 245, 26, '#fff', 'center');
+  }
+  if (Math.floor(G.time / 30) % 2 === 0 || true) text('ENTER – hrát znovu', VW / 2, 310, 22, '#fff', 'center');
+}
+
+function drawPlay() {
+  drawBackground();
+  drawTiles();
+  drawFlags();
+  drawCoins();
+  enemies.forEach(drawEnemy);
+  drawFireballs();
+  const p = P;
+  const flicker = p.invuln > 0 && Math.floor(p.invuln / 4) % 2 === 0;
+  if (!flicker) drawDragon(p.x + p.w / 2 - G.cam, p.y + p.h, p.face, p.anim, !p.ground, p.vy, p.breath, 1, false);
+  drawParticles();
+  drawHUD();
+  if (G.paused) { overlay(0.5); text('PAUZA', VW / 2, VH / 2, 56, '#fff', 'center'); text('P – pokračovat', VW / 2, VH / 2 + 40, 20, '#fff', 'center'); }
+}
+
+// ============================================================
+//  Hlavní smyčka (pevný krok 60 Hz)
+// ============================================================
+let last = performance.now(), acc = 0;
+const STEP = 1000 / 60;
+
+function tick() {
+  if (G.state === 'title') {
+    G.time++;
+    if (pressedEnter) newGame();
+  } else if (G.state === 'play') {
+    if (!G.paused) updatePlay();
+  } else {
+    G.time++;
+    if (pressedEnter) newGame();
+  }
+  pressedEnter = false;
+}
+
+function frame(now) {
+  acc += Math.min(100, now - last); last = now;
+  while (acc >= STEP) { tick(); acc -= STEP; }
+
+  ctx.clearRect(0, 0, VW, VH);
+  if (G.state === 'title') drawTitle();
+  else { drawPlay(); if (G.state === 'win') drawEnd(true); else if (G.state === 'over') drawEnd(false); }
+  requestAnimationFrame(frame);
+}
+
+buildLevel();
+P = newPlayer(2 * T);
+requestAnimationFrame(frame);
+
+// pro testování
+window.__game = { G, get P() { return P; }, keys };
+</script>
+</body>
+</html>
