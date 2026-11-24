@@ -17,7 +17,7 @@
 <body>
 <canvas id="game" width="800" height="480"></canvas>
 <p><kbd>←</kbd><kbd>→</kbd> / <kbd>A</kbd><kbd>D</kbd> chůze · <kbd>↑</kbd> / <kbd>W</kbd> / <kbd>Mezerník</kbd> skok (2× = dvojskok) ·
-   <kbd>Shift</kbd> / <kbd>F</kbd> oheň · <kbd>P</kbd> pauza · <kbd>M</kbd> zvuk</p>
+   <kbd>Shift</kbd> / <kbd>F</kbd> oheň (z bonusu) · <kbd>↑</kbd>/<kbd>↓</kbd> při létání · <kbd>P</kbd> pauza · <kbd>M</kbd> zvuk</p>
 
 <script>
 "use strict";
@@ -86,20 +86,21 @@ const sfx = {
   win:   () => [523, 659, 784, 1047].forEach((f, i) => beep(f, 0.2, 'square', 0, 0.05, i * 0.13)),
   over:  () => [392, 330, 262, 196].forEach((f, i) => beep(f, 0.3, 'triangle', 0, 0.07, i * 0.2)),
   check: () => { beep(660, 0.1, 'square'); beep(880, 0.2, 'square', 0, 0.05, 0.1); },
+  power: () => [523, 784, 1047, 1568].forEach((f, i) => beep(f, 0.14, 'square', 0, 0.05, i * 0.07)),
 };
 
 // ============================================================
 //  Stav hry
 // ============================================================
 const G = { state: 'title', paused: false, muted: false, score: 0, coins: 0, lives: 3, time: 0, cam: 0 };
-let grid, coinsList, enemies, fireballs, particles, bumps, P, checkpoint;
+let grid, coinsList, enemies, fireballs, particles, bumps, items, P, checkpoint;
 
 // ============================================================
 //  Level (sestavený programově)
 // ============================================================
 function buildLevel() {
   grid = Array.from({ length: LH }, () => Array(LW).fill(' '));
-  coinsList = []; enemies = []; fireballs = []; particles = []; bumps = {};
+  coinsList = []; enemies = []; fireballs = []; particles = []; bumps = {}; items = [];
 
   const set = (x, y, t) => { if (x >= 0 && x < LW && y >= 0 && y < LH) grid[y][x] = t; };
   const ground = (x1, x2) => { for (let x = x1; x <= x2; x++) { set(x, 13, '#'); set(x, 14, '#'); } };
@@ -117,7 +118,7 @@ function buildLevel() {
   row(9, 9, 1); set(10, 9, '?'); row(11, 9, 1); set(12, 9, '?'); row(13, 9, 1);
   set(11, 5, '?');
   coinRow(15, 11, 3);
-  row(20, 9, 4); coinRow(20, 8, 4);
+  row(20, 9, 4); coinRow(20, 8, 4); set(21, 9, '?');
   // oblouk coinů nad první dírou
   coin(27, 10); coin(28, 9); coin(29, 9); coin(30, 10);
 
@@ -128,7 +129,7 @@ function buildLevel() {
   coinRow(52, 9, 1); coin(51, 10); coin(53, 10);       // nad další dírou
 
   // Úsek 3: vysoká cesta
-  row(56, 9, 3); row(61, 7, 3); row(66, 9, 3);
+  row(56, 9, 3); row(61, 7, 3); row(66, 9, 3); set(57, 9, '?'); set(67, 9, '?');
   coinRow(56, 8, 3); coinRow(61, 6, 3); coinRow(66, 8, 3);
   set(62, 7, '?');
   pipe(72, 1);
@@ -137,12 +138,12 @@ function buildLevel() {
   // Úsek 4: schody dolů a díra
   row(79, 10, 2); coin(79, 9); coin(80, 9);
   row(84, 9, 1); set(85, 9, '?'); row(86, 9, 1); set(85, 5, '?');
-  row(90, 10, 5); coinRow(90, 9, 5);
+  row(90, 10, 5); coinRow(90, 9, 5); set(92, 10, '?');
   pipe(96, 2);
   coin(101, 9); coin(102, 10);
 
   // Úsek 5: finále + schody
-  row(106, 9, 3); coinRow(106, 8, 3);
+  row(106, 9, 3); coinRow(106, 8, 3); set(107, 9, '?');
   row(112, 9, 1); set(113, 9, '?'); row(114, 9, 1);
   pipe(117, 2);
   for (let i = 0; i < 8; i++) for (let j = 0; j <= i; j++) set(123 + i, 12 - j, '#');
@@ -160,10 +161,10 @@ function flagX() { return 134 * T; }
 
 function newPlayer(x) {
   return { x, y: GROUND_ROW * T - 28, w: 24, h: 28, vx: 0, vy: 0, face: 1, ground: false,
-           coyote: 0, airJumped: false, invuln: 0, fireCd: 0, breath: 0, anim: 0 };
+           coyote: 0, airJumped: false, fire: 0, wings: 0, wheels: 0, spin: 0, wrot: 0, hintCd: 0, invuln: 0, fireCd: 0, breath: 0, anim: 0 };
 }
 function newGame() {
-  G.score = 0; G.coins = 0; G.lives = 3; G.time = 0; G.paused = false;
+  G.score = 0; G.coins = 0; G.lives = 3; G.time = 0; G.paused = false; G.noBonus = 0;
   buildLevel();
   P = newPlayer(2 * T);
   G.cam = 0;
@@ -221,14 +222,55 @@ function puff(x, y, color, n = 6) {
 // ============================================================
 //  Aktualizace
 // ============================================================
+const BONUS_NAMES = { fire: 'OHEŇ! 60 s', wings: 'LÉTÁNÍ! 30 s', shroom: 'TRAKTOR! 30 s' };
+
+function spawnBonus(tx, ty, forced) {
+  const bag = [['coin', 22], ['chest', 20], ['fire', 22], ['wings', 18], ['shroom', 18]];
+  let type = forced;
+  if (!type) {
+    // po dvou "prázdných" blocích v řadě padne vždy nějaký bonus
+    const pool = (G.noBonus || 0) >= 2 ? bag.filter(b => b[0] !== 'coin') : bag;
+    let r = Math.random() * pool.reduce((sum, b) => sum + b[1], 0);
+    for (const [name, w] of pool) { r -= w; if (r <= 0) { type = name; break; } }
+    type = type || pool[0][0];
+  }
+  if (type === 'coin') {
+    G.noBonus = (G.noBonus || 0) + 1;
+    G.coins++; G.score += 100;
+    popup(tx * T + 8, ty * T - 6, '+100', '#ffe066'); sfx.coin();
+    puff(tx * T + 16, ty * T, '#ffd93b', 5);
+    return;
+  }
+  G.noBonus = 0;
+  items.push({ type, x: tx * T + 4, baseY: ty * T - 24, y: ty * T, w: 24, h: 24, t: 0, got: false });
+  sfx.bump();
+}
+
+function collectItem(it) {
+  const p = P;
+  if (it.type === 'chest') {
+    G.score += 500; popup(it.x, it.y - 8, '+500', '#ffe066'); sfx.coin(); sfx.power();
+    puff(it.x + 12, it.y + 12, '#ffd93b', 10);
+    return;
+  }
+  if (it.type === 'fire') p.fire = 3600;
+  if (it.type === 'wings') p.wings = 1800;
+  if (it.type === 'shroom') p.wheels = 1800;
+  G.score += 100;
+  popup(it.x - 10, it.y - 10, BONUS_NAMES[it.type], '#7dffb0');
+  sfx.power();
+  puff(it.x + 12, it.y + 12, '#ffffff', 10);
+}
+
 function loseLife(fell) {
   G.lives--;
   sfx.hurt();
   if (G.lives <= 0) { G.state = 'over'; sfx.over(); return; }
   if (fell) {
     const sx = checkpoint.reached ? checkpoint.spawnX : 2 * T;
+    const old = P;
     P = newPlayer(sx);
-    P.invuln = 90;
+    P.invuln = 90; P.fire = old.fire; P.wings = old.wings; P.wheels = old.wheels;
   } else {
     P.invuln = 120; P.vy = -6; P.vx = -P.face * 4;
   }
@@ -250,6 +292,14 @@ function updatePlay() {
     else p.vx -= Math.sign(p.vx) * fric * (p.ground ? 1 : 0.25);
   }
 
+  const upKey = keys.ArrowUp || keys.KeyW || keys.Space;
+  const downKey = keys.ArrowDown || keys.KeyS;
+  if (p.wings > 0) {
+    // létání: dračí ocas se točí, nahoru a dolů se pohybuje libovolně
+    const want = upKey ? -3.4 : downKey ? 3.4 : (p.ground ? 1 : 0);
+    p.vy += (want - p.vy) * 0.25;
+    p.coyote = 0; jumpBuf = 0; p.airJumped = false;
+  } else {
   // skok (coyote time + buffer)
   p.coyote = p.ground ? 6 : p.coyote - 1;
   if (jumpBuf > 0) jumpBuf--;
@@ -264,9 +314,12 @@ function updatePlay() {
   // gravitace (kratší skok při puštění klávesy)
   const g = (p.vy < 0 && !jumpHeld) ? 1.3 : 0.5;
   p.vy = Math.min(p.vy + g, 12);
+  }
 
   const res = moveBody(p);
   p.ground = res.ground;
+  if (p.wings > 0 && p.y < 0) { p.y = 0; p.vy = 0; }
+  p.wrot += p.vx * p.face / 8;
   if (Math.abs(p.vx) > 0.1 && p.ground) p.anim += Math.abs(p.vx) * 0.12;
 
   // hlavou do bloku
@@ -278,9 +331,7 @@ function updatePlay() {
     if (t === '?' || t === 'B') {
       bumps[tx + ',' + ty] = 10;
       if (t === '?') {
-        grid[ty][tx] = 'U'; G.coins++; G.score += 100;
-        popup(tx * T + 8, ty * T - 6, '+100', '#ffe066'); sfx.coin();
-        puff(tx * T + 16, ty * T, '#ffd93b', 5);
+        grid[ty][tx] = 'U'; spawnBonus(tx, ty);
       } else sfx.bump();
     }
   }
@@ -288,11 +339,16 @@ function updatePlay() {
   // oheň
   if (p.fireCd > 0) p.fireCd--;
   if (p.breath > 0) p.breath--;
-  if (fireKey && p.fireCd <= 0) {
+  if (fireKey && p.fire > 0 && p.fireCd <= 0) {
     fireballs.push({ x: p.x + (p.face > 0 ? p.w : -10), y: p.y + 6, w: 10, h: 10, vx: p.face * 6 + p.vx * 0.3, vy: 0, life: 110 });
     p.fireCd = 22; p.breath = 10; sfx.fire();
   }
   if (p.invuln > 0) p.invuln--;
+  if (p.fire > 0) p.fire--;
+  if (p.wings > 0) { p.wings--; p.spin += 0.7; }
+  if (p.wheels > 0) p.wheels--;
+  if (fireKey && p.fire <= 0 && p.hintCd <= 0) { p.hintCd = 240; popup(p.x - 10, p.y - 14, 'Oheň je v ? blocích', '#ffb27a'); }
+  if (p.hintCd > 0) p.hintCd--;
 
   // ohňové koule
   for (const f of fireballs) {
@@ -338,6 +394,9 @@ function updatePlay() {
         e.dead = true; e.timer = 30;
         p.vy = jumpHeld ? -10 : -7;
         G.score += 100; popup(e.x, e.y - 8, '+100'); sfx.stomp(); puff(e.x + 14, e.y + e.h, '#8b5a2b', 6);
+      } else if (p.wheels > 0) {
+        e.dead = true; e.timer = 30;
+        G.score += 100; popup(e.x, e.y - 8, '+100', '#ffb27a'); sfx.stomp(); puff(e.x + 14, e.y + e.h, '#8b5a2b', 8);
       } else if (p.invuln <= 0) {
         loseLife(false);
         if (G.state !== 'play') return;
@@ -345,6 +404,14 @@ function updatePlay() {
     }
   }
   enemies = enemies.filter(e => !(e.dead && e.timer <= 0));
+
+  // bonusy
+  for (const it of items) {
+    it.t++;
+    it.y = it.baseY + 24 * (1 - Math.min(1, it.t / 14));
+    if (it.t > 8 && !it.got && overlap(p, it)) { it.got = true; collectItem(it); }
+  }
+  items = items.filter(it => !it.got);
 
   // mince
   for (const c of coinsList) {
@@ -468,6 +535,54 @@ function drawTiles() {
   }
 }
 
+function drawItems() {
+  for (const it of items) {
+    const sx = Math.round(it.x - G.cam);
+    if (sx < -40 || sx > VW + 40) continue;
+    const ready = it.t > 14;
+    const sy = Math.round(it.y + (ready ? Math.sin(G.time * 0.1) * 2 : 0));
+    if (ready) {
+      ctx.fillStyle = 'rgba(255,255,255,' + (0.22 + 0.12 * Math.sin(G.time * 0.15)) + ')';
+      ctx.beginPath(); ctx.arc(sx + 12, sy + 12, 19, 0, 7); ctx.fill();
+    }
+    ctx.save(); ctx.translate(sx, sy);
+    if (it.type === 'chest') {
+      ctx.fillStyle = '#7a4a22'; ctx.fillRect(1, 10, 22, 13);
+      ctx.fillStyle = '#a8692f'; ctx.fillRect(2, 11, 20, 11);
+      ctx.fillStyle = '#b97a3d';
+      ctx.beginPath(); ctx.moveTo(1, 11); ctx.lineTo(1, 8); ctx.quadraticCurveTo(12, -3, 23, 8); ctx.lineTo(23, 11); ctx.fill();
+      ctx.fillStyle = '#e0b941';
+      ctx.fillRect(4, 5, 3, 18); ctx.fillRect(17, 5, 3, 18); ctx.fillRect(1, 10, 22, 2);
+      ctx.fillStyle = '#ffd93b'; ctx.fillRect(10, 11, 4, 6);
+      ctx.fillStyle = '#6b4a00'; ctx.fillRect(11.5, 13, 1, 3);
+    } else if (it.type === 'fire') {
+      const f = Math.sin(G.time * 0.4) * 1.5;
+      ctx.strokeStyle = '#6b3f1d'; ctx.lineWidth = 4; ctx.lineCap = 'round';
+      ctx.beginPath(); ctx.moveTo(3, 22); ctx.lineTo(21, 17); ctx.moveTo(3, 17); ctx.lineTo(21, 22); ctx.stroke();
+      ctx.fillStyle = '#ff5a1f';
+      ctx.beginPath(); ctx.moveTo(4, 19); ctx.quadraticCurveTo(2, 9, 12, -1 + f); ctx.quadraticCurveTo(22, 9, 20, 19); ctx.fill();
+      ctx.fillStyle = '#ffb02e';
+      ctx.beginPath(); ctx.moveTo(8, 18); ctx.quadraticCurveTo(7, 11, 12, 5 + f); ctx.quadraticCurveTo(17, 11, 16, 18); ctx.fill();
+      ctx.fillStyle = '#fff3a0';
+      ctx.beginPath(); ctx.moveTo(10.5, 18); ctx.quadraticCurveTo(10, 14, 12, 11); ctx.quadraticCurveTo(14, 14, 13.5, 18); ctx.fill();
+    } else if (it.type === 'wings') {
+      ctx.strokeStyle = '#3cb44b'; ctx.lineWidth = 7; ctx.lineCap = 'round';
+      ctx.beginPath(); ctx.moveTo(3, 21); ctx.quadraticCurveTo(3, 7, 17, 7); ctx.stroke();
+      ctx.strokeStyle = '#7fd68b'; ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.moveTo(4, 20); ctx.quadraticCurveTo(4, 9, 15, 8); ctx.stroke();
+      ctx.fillStyle = '#ff8c42';
+      ctx.beginPath(); ctx.moveTo(17, 0); ctx.lineTo(24, 7); ctx.lineTo(17, 14); ctx.lineTo(19, 7); ctx.fill();
+    } else if (it.type === 'shroom') {
+      ctx.fillStyle = '#f2e3c6'; ctx.fillRect(7, 13, 10, 10);
+      ctx.fillStyle = '#e63946';
+      ctx.beginPath(); ctx.arc(12, 14, 12, Math.PI, 0); ctx.closePath(); ctx.fill();
+      ctx.fillStyle = '#fff';
+      ctx.beginPath(); ctx.arc(7, 9, 2.6, 0, 7); ctx.arc(16.5, 8, 3, 0, 7); ctx.arc(12, 12.5, 1.8, 0, 7); ctx.fill();
+    }
+    ctx.restore();
+  }
+}
+
 function drawCoins() {
   const t = G.time;
   for (const c of coinsList) {
@@ -508,7 +623,19 @@ function drawFlags() {
 // ============================================================
 //  Kreslení – postavy
 // ============================================================
-function drawDragon(cx, bottom, face, phase, airborne, vy, breath, scale = 1, blink = false) {
+function drawWheel(x, y, r, rot) {
+  ctx.save(); ctx.translate(x, y); ctx.rotate(rot);
+  ctx.fillStyle = '#1b1b1f'; ctx.beginPath(); ctx.arc(0, 0, r, 0, 7); ctx.fill();
+  ctx.fillStyle = '#3a3a44';
+  for (let i = 0; i < 10; i++) { ctx.rotate(Math.PI / 5); ctx.fillRect(-1.4, -r - 0.6, 2.8, 3); }
+  ctx.fillStyle = '#f2b705'; ctx.beginPath(); ctx.arc(0, 0, r * 0.55, 0, 7); ctx.fill();
+  ctx.strokeStyle = '#a77d00'; ctx.lineWidth = 1.2;
+  ctx.beginPath(); ctx.moveTo(-r * 0.5, 0); ctx.lineTo(r * 0.5, 0); ctx.moveTo(0, -r * 0.5); ctx.lineTo(0, r * 0.5); ctx.stroke();
+  ctx.fillStyle = '#5a4300'; ctx.beginPath(); ctx.arc(0, 0, r * 0.18, 0, 7); ctx.fill();
+  ctx.restore();
+}
+
+function drawDragon(cx, bottom, face, phase, airborne, vy, breath, scale = 1, blink = false, fx = {}) {
   ctx.save();
   ctx.translate(cx, bottom);
   ctx.scale(face * scale, scale);
@@ -516,7 +643,9 @@ function drawDragon(cx, bottom, face, phase, airborne, vy, breath, scale = 1, bl
   const green = '#3cb44b', dark = '#2a8f39', belly = '#f6e58d', accent = '#ff8c42';
   const legSwing = airborne ? 0 : Math.sin(phase * 2) * 4;
 
-  // ocas
+  // ocas (při létání se točí jako vrtule)
+  ctx.save();
+  if (fx.flying) { ctx.translate(-7, -11); ctx.rotate(fx.spin); ctx.scale(1.3, 1.3); ctx.translate(7, 11); }
   ctx.fillStyle = green;
   ctx.beginPath();
   ctx.moveTo(-8, -10);
@@ -525,6 +654,8 @@ function drawDragon(cx, bottom, face, phase, airborne, vy, breath, scale = 1, bl
   ctx.fill();
   ctx.fillStyle = accent;
   ctx.beginPath(); ctx.moveTo(-24, -13); ctx.lineTo(-27, -19); ctx.lineTo(-20, -15); ctx.fill();
+
+  ctx.restore();
 
   // křídlo (za tělem)
   const flap = airborne ? (vy < 0 ? -1 : 0.4) : Math.sin(phase * 0.6) * 0.15;
@@ -539,11 +670,13 @@ function drawDragon(cx, bottom, face, phase, airborne, vy, breath, scale = 1, bl
   ctx.fillStyle = dark;
   ctx.fillRect(-4, -19, 3, 3);
 
-  // zadní nohy
-  ctx.fillStyle = dark;
-  ctx.beginPath(); ctx.ellipse(-4 + legSwing, -3, 5, 3.4, 0, 0, 7); ctx.fill();
-  ctx.fillStyle = green;
-  ctx.beginPath(); ctx.ellipse(6 - legSwing, -3, 5.5, 3.6, 0, 0, 7); ctx.fill();
+  // zadní nohy (s traktorem je nahradí kola)
+  if (!fx.wheels) {
+    ctx.fillStyle = dark;
+    ctx.beginPath(); ctx.ellipse(-4 + legSwing, -3, 5, 3.4, 0, 0, 7); ctx.fill();
+    ctx.fillStyle = green;
+    ctx.beginPath(); ctx.ellipse(6 - legSwing, -3, 5.5, 3.6, 0, 0, 7); ctx.fill();
+  }
 
   // tělo + bříško
   ctx.fillStyle = green;
@@ -559,6 +692,9 @@ function drawDragon(cx, bottom, face, phase, airborne, vy, breath, scale = 1, bl
     const x = -10 + i * 0.5 - i * 1.5, y = -17 - i * 4;
     ctx.beginPath(); ctx.moveTo(x - 2, y + 4); ctx.lineTo(x - 6, y); ctx.lineTo(x, y - 2); ctx.fill();
   }
+
+  // traktorová kola
+  if (fx.wheels) { drawWheel(-5, -9, 9, fx.wheelRot || 0); drawWheel(9, -6.5, 6.5, (fx.wheelRot || 0) * 1.4); }
 
   // ručička
   ctx.fillStyle = green;
@@ -671,6 +807,17 @@ function drawHUD() {
   ctx.fillStyle = '#ffd93b'; ctx.beginPath(); ctx.arc(26, 58, 8, 0, 7); ctx.fill();
   ctx.fillStyle = '#c99700'; ctx.fillRect(24, 52, 3, 12);
   text('× ' + G.coins, 42, 65, 18);
+  const powers = [['fire', 'OHEŇ', '#ff7a1a', 3600], ['wings', 'LÉTÁNÍ', '#3cb44b', 1800], ['wheels', 'TRAKTOR', '#d94040', 1800]];
+  let by = 82;
+  for (const [k, label, col, max] of powers) {
+    const v = P[k];
+    if (v <= 0) continue;
+    ctx.globalAlpha = (v < 300 && Math.floor(v / 8) % 2 === 0) ? 0.35 : 1;
+    ctx.fillStyle = 'rgba(0,0,0,.45)'; ctx.fillRect(16, by, 130, 18);
+    ctx.fillStyle = col; ctx.fillRect(16, by, 130 * v / max, 18);
+    text(label + ' ' + Math.ceil(v / 60) + ' s', 22, by + 14, 13);
+    ctx.globalAlpha = 1; by += 24;
+  }
   text('SKÓRE ' + String(G.score).padStart(6, '0'), VW - 16, 32, 22, '#fff', 'right');
   if (G.muted) text('🔇', VW - 16, 58, 16, '#fff', 'right');
 }
@@ -688,6 +835,7 @@ function drawTitle() {
   drawDragon(VW / 2, 400, 1, G.time * 0.1, false, 0, (G.time % 120) < 10 ? 10 - (G.time % 120) : 0, 3.2, (G.time % 150) > 140);
   if (Math.floor(G.time / 30) % 2 === 0) text('Stiskni ENTER nebo MEZERNÍK', VW / 2, 440, 24, '#fff', 'center');
   text('Sesbírej mince, přeskoč díry, zastav ohnivé houbičky – a doleť do cíle!', VW / 2, 200, 17, '#fff', 'center');
+  text('Bonusy v blocích ?: oheň · létání · traktorová kola · truhlička', VW / 2, 228, 16, '#ffe066', 'center');
 }
 
 function drawEnd(win) {
@@ -704,6 +852,7 @@ function drawEnd(win) {
 
 function drawPlay() {
   drawBackground();
+  drawItems();
   drawTiles();
   drawFlags();
   drawCoins();
@@ -711,7 +860,8 @@ function drawPlay() {
   drawFireballs();
   const p = P;
   const flicker = p.invuln > 0 && Math.floor(p.invuln / 4) % 2 === 0;
-  if (!flicker) drawDragon(p.x + p.w / 2 - G.cam, p.y + p.h, p.face, p.anim, !p.ground, p.vy, p.breath, 1, false);
+  if (!flicker) drawDragon(p.x + p.w / 2 - G.cam, p.y + p.h, p.face, p.anim, !p.ground, p.vy, p.breath, 1, false,
+    { flying: p.wings > 0, spin: p.spin, wheels: p.wheels > 0, wheelRot: p.wrot });
   drawParticles();
   drawHUD();
   if (G.paused) { overlay(0.5); text('PAUZA', VW / 2, VH / 2, 56, '#fff', 'center'); text('P – pokračovat', VW / 2, VH / 2 + 40, 20, '#fff', 'center'); }
