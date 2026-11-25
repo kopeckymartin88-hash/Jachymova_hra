@@ -23,3 +23,11 @@ https://kopeckymartin88-hash.github.io/Jachymova_hra/
 - Překážky, které vypadají jako **záchody** (dlaždice `T`, 2 široké, 1–3 vysoké), nahradily původní roury. Víko a sedátko mají barvu motivu.
 - Boss Mimoň **háže banány** (`throwBanana`, `updateBananas`): letí obloukem k hráči, dá se jim uhnout nebo je sestřelit ohněm; ve zuřivé fázi hází dva naráz.
   Frekvenci hodů nastavují `BOSS.banana` / `BOSS.bananaRage` (snímky mezi hody).
+
+## Hudba
+- Hudba na pozadí je syntetizovaná přes Web Audio (žádné soubory) v chiptune stylu: obdélníkový/pulzní lead, trojúhelníková basa, šumová bicí.
+- Čtyři skladby Beethovena (`PIECES`): **Óda na radost**, **Pro Elišku**, **Osudová** (5. symfonie), **Měsíční svit**; každý level má vlastní aranž
+  (tónina, tempo, zvuk, doprovod, bicí, ozvěna) v poli `MUSIC_ARR` (21 levelů + finále po výhře).
+- Hudba se pouští ve `startLevel`, zastavuje se po dokončení levelu / konci hry, pauza ji drží, `M` ji ztlumí.
+  Ve zuřivé fázi bosse zrychlí o 20 % (`musicTempo`).
+- Chceš-li změnit aranž levelu, uprav jeho řádek v `MUSIC_ARR` (`key` = posun v půltónech, `minor` = mollová verze Ódy).

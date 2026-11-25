@@ -25,7 +25,7 @@
 //  Základní konstanty
 // ============================================================
 // Verze hry – s každým pushem se zvýší (0.0 → 0.1 → 0.2 …), viz CLAUDE.md a bump-version.sh
-const VERSION = '0.2';
+const VERSION = '0.3';
 
 const T = 32;                 // velikost dlaždice
 const VW = 800, VH = 480;     // velikost obrazovky
@@ -97,6 +97,239 @@ const sfx = {
   throw: () => beep(520, 0.14, 'triangle', 260, 0.05),
   power: () => [523, 784, 1047, 1568].forEach((f, i) => beep(f, 0.14, 'square', 0, 0.05, i * 0.07)),
 };
+
+// ============================================================
+//  Hudba na pozadí: motivy Beethovena v chiptune úpravě (Web Audio, žádné soubory)
+//  Čtyři skladby (Óda na radost, Pro Elišku, Osudová, Měsíční světlo) v 22 aranžích:
+//  jiná tónina, tempo, zvuk, doprovod i bicí pro každý level.
+// ============================================================
+const NOTE_PC = { C: 0, D: 2, E: 4, F: 5, G: 7, A: 9, B: 11 };
+function noteMidi(name) {                                   // 'C#4' → 61
+  const m = /^([A-G])([#b]?)(\d)$/.exec(name);
+  return 12 * (parseInt(m[3], 10) + 1) + NOTE_PC[m[1]] + (m[2] === '#' ? 1 : m[2] === 'b' ? -1 : 0);
+}
+function parseMelody(str) {                                 // 'E5:1 R:.5 …' → [[midi | null, délka v dobách], …]
+  return str.trim().split(/\s+/).map(tok => { const [n, d] = tok.split(':'); return [n === 'R' ? null : noteMidi(n), parseFloat(d)]; });
+}
+const midiFreq = m => 440 * Math.pow(2, (m - 69) / 12);
+
+const PIECES = {
+  // Symfonie č. 9 – Óda na radost (základ v C dur)
+  ode: { barLen: 4, major: true,
+    lead: parseMelody(`E5:1 E5:1 F5:1 G5:1 G5:1 F5:1 E5:1 D5:1 C5:1 C5:1 D5:1 E5:1 E5:1.5 D5:.5 D5:2
+      E5:1 E5:1 F5:1 G5:1 G5:1 F5:1 E5:1 D5:1 C5:1 C5:1 D5:1 E5:1 D5:1.5 C5:.5 C5:2
+      D5:1 D5:1 E5:1 C5:1 D5:1 E5:.5 F5:.5 E5:1 C5:1 D5:1 E5:.5 F5:.5 E5:1 D5:1 C5:1 D5:1 G4:2
+      E5:1 E5:1 F5:1 G5:1 G5:1 F5:1 E5:1 D5:1 C5:1 C5:1 D5:1 E5:1 D5:1.5 C5:.5 C5:2`),
+    chords: 'C G C G C G C C G C G G C G C C'.split(' ') },
+  // Klavírní bagatela Pro Elišku (a moll)
+  elise: { barLen: 1.5, major: false,
+    lead: parseMelody(`E5:.25 D#5:.25 E5:.25 B4:.25 D5:.25 C5:.25  A4:.5 R:.25 C4:.25 E4:.25 A4:.25  B4:.5 R:.25 E4:.25 G#4:.25 B4:.25  C5:.5 R:.25 E4:.25 E5:.25 D#5:.25
+      E5:.25 D#5:.25 E5:.25 B4:.25 D5:.25 C5:.25  A4:.5 R:.25 C4:.25 E4:.25 A4:.25  B4:.5 R:.25 E4:.25 C5:.25 B4:.25  A4:1 E5:.25 D#5:.25`),
+    chords: 'Am Am E Am Am Am E Am'.split(' ') },
+  // Symfonie č. 5 – „osud klepe na dveře“ (c moll)
+  fate: { barLen: 4, major: false,
+    lead: parseMelody(`R:.5 G4:.5 G4:.5 G4:.5 Eb4:2  R:.5 F4:.5 F4:.5 F4:.5 D4:2  R:.5 G4:.5 G4:.5 G4:.5 Eb4:2  R:.5 F4:.5 F4:.5 F4:.5 D4:2
+      G4:.5 Ab4:.5 Bb4:.5 C5:.5 D5:.5 Eb5:.5 F5:.5 G5:.5  R:.5 G5:.5 G5:.5 G5:.5 Eb5:2  R:.5 F5:.5 F5:.5 F5:.5 D5:2  C5:1 G4:1 C4:2`),
+    chords: 'Cm G Cm G Cm Cm G Cm'.split(' ') },
+  // Klavírní sonáta „Měsíční svit“ (cis moll) – třiolové arpeggio
+  moon: { barLen: 4, major: false, lead: [],
+    chords: ['C#m', 'B', 'A', 'G#', 'F#m', 'C#m', 'G#', 'C#m'],
+    arps: [['G#3', 'C#4', 'E4'], ['G#3', 'C#4', 'E4'], ['A3', 'C#4', 'E4'], ['G#3', 'C4', 'D#4'],
+           ['F#3', 'A3', 'C#4'], ['G#3', 'C#4', 'E4'], ['G#3', 'C4', 'D#4'], ['G#3', 'C#4', 'E4']] },
+};
+PIECES.moon.arps.forEach(ar => { for (let r = 0; r < 4; r++) for (let k = 0; k < 3; k++) PIECES.moon.lead.push([noteMidi(ar[k]), 1 / 3]); });
+
+// aranže: p = skladba, key = posun tóniny v půltónech, minor = mollová verze, bpm, leadOct = oktáva navíc,
+// lead/bass = zvuk (square | pulse | triangle | sawtooth), bass.pat = styl doprovodu, drums = styl bicích, echo = ozvěna
+const L = (w, duty, v) => ({ w, duty, v });
+const MUSIC_ARR = [
+  /*  1 Zelená louka       */ { p: 'ode',   key: 0,  bpm: 132, lead: L('square', .5),      bass: { pat: 'oompah' }, drums: 'light' },
+  /*  2 Poušť              */ { p: 'elise', key: 0,  bpm: 112, lead: L('pulse', .25),      bass: { pat: 'oompah' }, drums: 'light' },
+  /*  3 Zima               */ { p: 'moon',  key: 0,  bpm: 60,  lead: L('triangle'),         bass: { pat: 'pedal' },  drums: 'none', echo: true },
+  /*  4 Noční les          */ { p: 'fate',  key: -5, bpm: 92,  lead: L('pulse', .125),     bass: { pat: 'pedal' },  drums: 'march' },
+  /*  5 Sopka              */ { p: 'fate',  key: 2,  bpm: 150, lead: L('sawtooth'),         bass: { pat: 'pulse8' }, drums: 'rock' },
+  /*  6 Podmoří            */ { p: 'ode',   key: 2,  bpm: 116, lead: L('triangle'),         bass: { pat: 'arp' },    drums: 'none', echo: true },
+  /*  7 Podzim             */ { p: 'elise', key: 5,  bpm: 124, lead: L('square', .5),      bass: { pat: 'oompah' }, drums: 'light' },
+  /*  8 Jeskyně            */ { p: 'moon',  key: 3,  bpm: 72,  lead: L('pulse', .25),      bass: { pat: 'pedal' },  drums: 'none' },
+  /*  9 Nad mraky          */ { p: 'ode',   key: 0,  bpm: 140, leadOct: 1, lead: L('triangle'), bass: { pat: 'oompah' }, drums: 'light' },
+  /* 10 Džungle            */ { p: 'ode',   key: 0,  bpm: 126, minor: true, lead: L('pulse', .25), bass: { pat: 'walk' }, drums: 'tom' },
+  /* 11 Cukrová země       */ { p: 'elise', key: 0,  bpm: 140, leadOct: 1, lead: L('triangle'), bass: { pat: 'oompah' }, drums: 'light' },
+  /* 12 Bažina             */ { p: 'fate',  key: -2, bpm: 80,  lead: L('sawtooth'),         bass: { pat: 'pedal' },  drums: 'none' },
+  /* 13 Pláž               */ { p: 'ode',   key: 7,  bpm: 122, lead: L('square', .5),      bass: { pat: 'offbeat' }, drums: 'light' },
+  /* 14 Noční město        */ { p: 'moon',  key: 0,  bpm: 92,  lead: L('pulse', .125),     bass: { pat: 'pulse8' }, drums: 'floor' },
+  /* 15 Továrna            */ { p: 'fate',  key: 5,  bpm: 138, lead: L('square', .5),      bass: { pat: 'pulse8' }, drums: 'floor' },
+  /* 16 Měsíc              */ { p: 'ode',   key: -2, bpm: 84,  minor: true, lead: L('triangle'), bass: { pat: 'pedal' }, drums: 'none', echo: true },
+  /* 17 Hřbitov            */ { p: 'elise', key: -3, bpm: 98,  lead: L('sawtooth'),         bass: { pat: 'oompah' }, drums: 'light' },
+  /* 18 Ledová jeskyně     */ { p: 'moon',  key: 5,  bpm: 78,  leadOct: 1, lead: L('triangle'), bass: { pat: 'pedal' }, drums: 'none', echo: true },
+  /* 19 Ohnivá pevnost     */ { p: 'fate',  key: 3,  bpm: 166, lead: L('pulse', .25),      bass: { pat: 'pulse8' }, drums: 'rock' },
+  /* 20 Zlatý chrám        */ { p: 'ode',   key: 5,  bpm: 112, lead: L('sawtooth'),         bass: { pat: 'oompah' }, drums: 'march' },
+  /* 21 Hrad – Mimoň       */ { p: 'fate',  key: 0,  bpm: 158, lead: L('square', .5),      bass: { pat: 'pulse8' }, drums: 'rock' },
+  /* 22 Finále (výhra)     */ { p: 'ode',   key: 0,  bpm: 120, lead: L('square', .5),      bass: { pat: 'oompah' }, drums: 'march' },
+];
+
+function bassBar(pat, bm, minor, barLen, bs) {
+  const third = bm + (minor ? 3 : 4), fifth = bm + 7, oct = bm + 12;
+  const E = (t, d, m, acc, leg) => ({ t, d, m, w: bs.w || 'triangle', v: (bs.v || 0.1) * (acc ? 1.18 : 1), k: 'bass', leg: leg || 0.8 });
+  if (barLen !== 4) return [E(0, .5, bm, 1), E(.5, .5, fifth), E(1, .5, fifth)];          // 3/8 takt (Pro Elišku)
+  switch (pat) {
+    case 'walk': return [E(0, .9, bm, 1), E(1, .9, third), E(2, .9, fifth), E(3, .9, third)];
+    case 'arp': return [0, 1, 2, 3, 4, 5, 6, 7].map(i => E(i * .5, .45, [bm, fifth, oct, fifth][i % 4], i === 0));
+    case 'pedal': return [E(0, 4, bm, 1, .96)];
+    case 'pulse8': return [0, 1, 2, 3, 4, 5, 6, 7].map(i => E(i * .5, .45, bm, i === 0));
+    case 'offbeat': return [0, 1, 2, 3].map(i => E(i + .5, .45, i % 2 ? fifth : bm));
+    default: return [E(0, .5, bm, 1), E(1, .5, fifth), E(2, .5, bm), E(3, .5, fifth)];     // oompah
+  }
+}
+
+function drumBar(style, barLen) {
+  const o = [], K = t => o.push({ t, dr: 'kick', v: .38 }), S = t => o.push({ t, dr: 'snare', v: .11 }),
+        H = t => o.push({ t, dr: 'hat', v: .045 }), M = t => o.push({ t, dr: 'tom', v: .26 });
+  if (style === 'none') return o;
+  if (barLen !== 4) { K(0); H(.75); return o; }
+  switch (style) {
+    case 'march': K(0); K(2); S(1); S(3); break;
+    case 'rock': K(0); K(2); K(2.5); S(1); S(3); [0, .5, 1, 1.5, 2, 2.5, 3, 3.5].forEach(H); break;
+    case 'floor': [0, 1, 2, 3].forEach(K); [.5, 1.5, 2.5, 3.5].forEach(H); S(1); S(3); break;
+    case 'tom': K(0); [0.75, 1.5, 2, 2.75, 3.5].forEach(M); break;
+    default: o.push({ t: 0, dr: 'kick', v: .24 }, { t: 2, dr: 'kick', v: .2 }); [.5, 1.5, 2.5, 3.5].forEach(H);   // light
+  }
+  return o;
+}
+
+// z aranže vyrobí seřazený seznam událostí (melodie, basa, bicí) pro jednu smyčku
+function buildTrack(cfg) {
+  const pc = PIECES[cfg.p], key = cfg.key || 0, oct = (cfg.leadOct || 0) * 12;
+  const lw = cfg.lead || {}, bs = cfg.bass || {};
+  const lwave = lw.w || 'square';
+  const lv = lw.v || ({ triangle: 0.09, sine: 0.09, sawtooth: 0.032 }[lwave] || 0.05);
+  const minor = !!cfg.minor && pc.major;
+  const tr = m => { let x = m; if (minor) { const c = ((x % 12) + 12) % 12; if (c === 4 || c === 9 || c === 11) x -= 1; } return x + key + oct; };
+  const ev = []; let t = 0;
+  for (const [m, d] of pc.lead) {
+    if (m !== null) {
+      ev.push({ t, d, m: tr(m), w: lwave, duty: lw.duty, v: lv, k: 'lead' });
+      if (cfg.echo) ev.push({ t: t + 0.75, d, m: tr(m), w: lwave, duty: lw.duty, v: lv * 0.35, k: 'echo' });
+    }
+    t += d;
+  }
+  const len = pc.chords.length * pc.barLen;
+  pc.chords.forEach((ch, i) => {
+    const mm = /^([A-G])([#b]?)(m?)/.exec(ch);
+    const rootPc = (NOTE_PC[mm[1]] + (mm[2] === '#' ? 1 : mm[2] === 'b' ? -1 : 0) + key + 120) % 12;
+    let isMin = mm[3] === 'm';
+    if (minor && !isMin && (NOTE_PC[mm[1]] === 0 || NOTE_PC[mm[1]] === 5)) isMin = true;
+    for (const e of bassBar(bs.pat, 36 + rootPc, isMin, pc.barLen, bs)) { e.t += i * pc.barLen; ev.push(e); }
+    for (const e of drumBar(cfg.drums, pc.barLen)) { e.t += i * pc.barLen; ev.push(e); }
+  });
+  ev.sort((a, b) => a.t - b.t);
+  return { events: ev, len };
+}
+
+// ---------- přehrávač ----------
+const mus = { playing: false, finale: false, wasPaused: false, bpm: 120, tempoMult: 1, events: [], idx: 0, loop: 0, loopLen: 0,
+              anchorTime: 0, anchorBeat: 0, master: null, bus: null, noise: null, timer: null, waves: {} };
+
+function musicInit() {
+  if (!AC || mus.master) return;
+  mus.master = AC.createGain(); mus.master.gain.value = 0.6; mus.master.connect(AC.destination);
+  const n = AC.createBuffer(1, AC.sampleRate, AC.sampleRate), d = n.getChannelData(0);
+  for (let i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1;
+  mus.noise = n;
+}
+
+function pulseWave(duty) {                                       // obdélník s libovolnou šířkou pulzu (Fourierova řada)
+  if (!mus.waves[duty]) {
+    const N = 48, re = new Float32Array(N), im = new Float32Array(N);
+    for (let n = 1; n < N; n++) {
+      const a = 2 / (n * Math.PI), x = n * Math.PI * duty;
+      re[n] = a * Math.sin(x) * Math.cos(x); im[n] = a * Math.sin(x) * Math.sin(x);
+    }
+    mus.waves[duty] = AC.createPeriodicWave(re, im);
+  }
+  return mus.waves[duty];
+}
+
+function playNote(ev, t, spb) {
+  const o = AC.createOscillator(), g = AC.createGain();
+  if (ev.w === 'pulse') o.setPeriodicWave(pulseWave(ev.duty || 0.25)); else o.type = ev.w;
+  o.frequency.setValueAtTime(midiFreq(ev.m), t);
+  const dur = Math.max(0.05, ev.d * spb * (ev.leg || 0.85));
+  g.gain.setValueAtTime(0.0001, t);
+  g.gain.linearRampToValueAtTime(ev.v, t + 0.006);
+  g.gain.setValueAtTime(ev.v, t + Math.max(0.006, dur - 0.04));
+  g.gain.exponentialRampToValueAtTime(0.0001, t + dur + 0.03);
+  o.connect(g); g.connect(mus.bus);
+  o.start(t); o.stop(t + dur + 0.05);
+}
+
+function playDrum(ev, t) {
+  if (ev.dr === 'kick' || ev.dr === 'tom') {
+    const o = AC.createOscillator(), g = AC.createGain();
+    o.type = 'sine';
+    o.frequency.setValueAtTime(ev.dr === 'kick' ? 150 : 115, t);
+    o.frequency.exponentialRampToValueAtTime(ev.dr === 'kick' ? 42 : 70, t + 0.12);
+    g.gain.setValueAtTime(ev.v, t); g.gain.exponentialRampToValueAtTime(0.0001, t + 0.16);
+    o.connect(g); g.connect(mus.bus); o.start(t); o.stop(t + 0.18);
+  } else {
+    const src = AC.createBufferSource(), f = AC.createBiquadFilter(), g = AC.createGain();
+    const len = ev.dr === 'hat' ? 0.04 : 0.12;
+    src.buffer = mus.noise; f.type = 'highpass'; f.frequency.value = ev.dr === 'hat' ? 7000 : 1400;
+    g.gain.setValueAtTime(ev.v, t); g.gain.exponentialRampToValueAtTime(0.0001, t + len);
+    src.connect(f); f.connect(g); g.connect(mus.bus);
+    src.start(t, Math.random() * 0.5, len + 0.02);
+  }
+}
+
+function musicPlay(n) {
+  musicStop();
+  if (!AC) return;
+  const cfg = MUSIC_ARR[n - 1];
+  if (!cfg) return;
+  musicInit();
+  const tr = buildTrack(cfg);
+  mus.events = tr.events; mus.loopLen = tr.len; mus.idx = 0; mus.loop = 0;
+  mus.bpm = cfg.bpm; mus.tempoMult = 1; mus.finale = false; mus.wasPaused = false;
+  mus.bus = AC.createGain(); mus.bus.connect(mus.master);
+  mus.anchorTime = AC.currentTime + 0.12; mus.anchorBeat = 0; mus.playing = true;
+  if (!mus.timer) mus.timer = setInterval(musicTick, 30);
+}
+
+function musicStop() {
+  if (!mus.playing && !mus.bus) return;
+  mus.playing = false;
+  const bus = mus.bus; mus.bus = null;
+  if (bus && AC) { bus.gain.setTargetAtTime(0, AC.currentTime, 0.04); setTimeout(() => { try { bus.disconnect(); } catch (e) {} }, 500); }
+}
+
+function musicTempo(mult) {                                      // zrychlení/zpomalení bez skoku v rytmu
+  if (!mus.playing) return;
+  const nb = mus.loop * mus.loopLen + mus.events[mus.idx].t;
+  mus.anchorTime += (nb - mus.anchorBeat) * (60 / (mus.bpm * mus.tempoMult)); mus.anchorBeat = nb;
+  mus.tempoMult = mult;
+}
+
+function musicTick() {
+  if (!AC || !mus.master) return;
+  mus.master.gain.value = G.muted ? 0 : 0.6;
+  if (!mus.playing) return;
+  const active = G.state === 'play' || (mus.finale && G.state === 'win');
+  if (G.paused || !active) { mus.wasPaused = true; return; }
+  const now = AC.currentTime;
+  if (mus.wasPaused) {                                           // po pauze naváže od místa, kde skončila
+    mus.wasPaused = false;
+    mus.anchorBeat = mus.loop * mus.loopLen + mus.events[mus.idx].t; mus.anchorTime = now + 0.08;
+  }
+  const spb = 60 / (mus.bpm * mus.tempoMult);
+  for (let guard = 0; guard < 400; guard++) {
+    const ev = mus.events[mus.idx];
+    const beat = mus.loop * mus.loopLen + ev.t;
+    const tt = mus.anchorTime + (beat - mus.anchorBeat) * spb;
+    if (tt > now + 0.25) break;
+    if (tt >= now - 0.05) { if (ev.dr) playDrum(ev, tt); else playNote(ev, tt, spb); }
+    mus.idx++;
+    if (mus.idx >= mus.events.length) { mus.idx = 0; mus.loop++; }
+  }
+}
 
 // ============================================================
 //  Stav hry
@@ -348,6 +581,8 @@ function startLevel(n) {
   G.level = n; buildLevel(n);
   P = newPlayer(2 * T);
   G.cam = 0; G.state = 'play'; G.paused = false; G.banner = 170;
+  G.finaleStarted = false;
+  musicPlay(n);                                          // hudba daného levelu
 }
 
 function newPlayer(x) {
@@ -526,7 +761,7 @@ function updateBoss(e, p) {
   const rage = e.hp <= BOSS.hp / 2;
   e.anim += rage ? 0.22 : 0.12;
   if (e.hurt > 0) e.hurt--;
-  if (rage && !e.dropped) { e.dropped = true; items.push(lifeItem(14, 10)); popup(e.x, e.y - 30, 'ZBĚSILÝ!', '#ff8a8a'); }
+  if (rage && !e.dropped) { e.dropped = true; musicTempo(1.2); items.push(lifeItem(14, 10)); popup(e.x, e.y - 30, 'ZBĚSILÝ!', '#ff8a8a'); }
   const stunned = e.hurt > BOSS.hurt - 30;
   if (rage) e.dir = (p.x + p.w / 2) > (e.x + e.w / 2) ? 1 : -1;               // zuřivý Mimoň pronásleduje dráčka
   // útok: občas hodí banán (před hodem se otočí k dráčkovi, na chvíli se zastaví a zvedne ruku)
@@ -1694,6 +1929,9 @@ const STEP = 1000 / 60;
 
 function tick() {
   if (G.stT !== G.state) { G.stT = G.state; G.t2 = 0; }
+  // hudba hraje jen ve hře; po výhře nad bossem zazní finále (Óda na radost)
+  if (G.state === 'win' && !G.finaleStarted) { G.finaleStarted = true; musicPlay(22); mus.finale = true; }
+  else if (G.state !== 'play' && !(G.state === 'win' && mus.finale) && mus.playing) musicStop();
   if (G.state === 'title') {
     G.time++;
     if (pressedEnter) newGame();
