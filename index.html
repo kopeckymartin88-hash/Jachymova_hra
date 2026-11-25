@@ -272,6 +272,8 @@ function stickHit(e) {
   if (e.stun > 0) return true;           // během vyděšeného třesu je nezranitelný
   if (e.hits >= 1) return false;
   e.hits = 1; e.panic = true; e.stun = 30;
+  const dx = (e.x + e.w / 2) - (P.x + P.w / 2);
+  e.dir = Math.abs(dx) > 6 ? (dx > 0 ? 1 : -1) : P.face;    // první směr úniku: pryč od dráčka (při skoku shora tam, kam kouká)
   G.score += 100; popup(e.x - 8, e.y - 20, 'ÁÁÁ!', '#ff8a8a'); sfx.scream();
   puff(e.x + 11, e.y + 8, '#ff6a6a', 8);
   return true;
@@ -281,13 +283,12 @@ function updateStick(e, p) {
   if (e.stun > 0) { e.stun--; if (e.stun === 0) e.grace = 20; e.vx = 0; e.anim += 0.5; return; }   // vyděšeně se třese
   if (e.grace > 0) e.grace--;
   if (e.panic) {
-    const dx = (e.x + e.w / 2) - (p.x + p.w / 2);
-    if (Math.abs(dx) > 4) e.dir = dx > 0 ? 1 : -1;                    // utíká pryč od dráčka
     e.anim += 0.9;                                                      // kmitající nožičky
-    e.vx = e.dir * 3.6;
+    // na konci trati (u hrany díry) se otočí a utíká na druhou stranu; u zdi otáčí obecný kód níže
     const ax = Math.floor((e.x + (e.dir > 0 ? e.w + 4 : -4)) / T);
     const ay = Math.floor((e.y + e.h + 2) / T);
-    if (e.vy < 1 && !solidAt(ax, ay)) e.vx = 0;                         // u hrany se zastaví
+    if (e.vy < 1 && !solidAt(ax, ay)) e.dir *= -1;
+    e.vx = e.dir * 3.6;
   } else {
     e.anim += 0.12;
     e.vx = e.dir * 0.7;
