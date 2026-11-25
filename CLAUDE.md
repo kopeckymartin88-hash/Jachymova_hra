@@ -11,14 +11,15 @@ https://kopeckymartin88-hash.github.io/Jachymova_hra/
 
 ## Poznámky
 - Vývojová větev: `claude/gracious-cannon-qnfziu`.
-- Ovládání: šipky/WASD, skok ↑/W/Mezerník (2× = dvojskok), oheň Shift/F/X (jen s bonusem), P pauza, M zvuk.
+- Ovládání: šipky/WASD, skok ↑/W/Mezerník (2× = dvojskok), oheň Shift/F/X (s bonusem nebo koupený v obchodě), B obchod, P pauza, **M zvuky**, **H hudba**.
+- Na tabletu/telefonu se zapne dotykové ovládání (HTML tlačítka `#touch` + tlačítka nakreslená na plátně `drawTouchButtons`); klepnutí na plátno = Enter v menu.
 
 ## Levely (21 celkem)
 - **Level 1** je ručně postavený (`buildLevel1`), **levely 2–20** generuje `genLevel(n)` z pevného semínka podle obtížnosti
   (délka 150–240 dlaždic, víc děr, rour, nepřátel i rychlejších směrem k levelu 20; Pankáč od levelu 3).
 - **Level 21** je hradní aréna s bossem Mimoněm (`buildBoss`, vlastnosti bosse v konstantě `BOSS` – zatím zástupné hodnoty).
 - Každý level má vlastní motiv prostředí v poli `THEMES` (barvy, pozadí, počasí, vzhled dlaždic i děr).
-- Hra se neukládá. Po konci hry začíná hráč znovu od levelu 1. Životy se dají získat srdíčky 1UP a každými 50 mincemi (max. 9).
+- Hra se neukládá. Po konci hry pokračuje hráč **v levelu, kde zemřel** (3 životy, body i nákupy zůstávají); po výhře nad bossem začíná nová hra (vše se nuluje). Životy se dají získat srdíčky 1UP a každými 50 mincemi (max. 9).
 - Pro zkoušení lze hru spustit od libovolného levelu: `index.html?level=12`.
 - Překážky, které vypadají jako **záchody** (dlaždice `T`, 2 široké, 1–3 vysoké), nahradily původní roury. Víko a sedátko mají barvu motivu.
 - Boss Mimoň **háže banány** (`throwBanana`, `updateBananas`): letí obloukem k hráči, dá se jim uhnout nebo je sestřelit ohněm; ve zuřivé fázi hází dva naráz.
@@ -31,3 +32,9 @@ https://kopeckymartin88-hash.github.io/Jachymova_hra/
 - Hudba se pouští ve `startLevel`, zastavuje se po dokončení levelu / konci hry, pauza ji drží, `M` ji ztlumí.
   Ve zuřivé fázi bosse zrychlí o 20 % (`musicTempo`).
 - Chceš-li změnit aranž levelu, uprav jeho řádek v `MUSIC_ARR` (`key` = posun v půltónech, `minor` = mollová verze Ódy).
+
+## Obchod (klávesa B / ikona 🛒)
+- Za nasbírané **body** (skóre) se kupují: vylepšení (Ohnivý dech = střílení bez bonusu, Rychlý oheň, Extra život, Štít, Delší bonusy, Rychlejší běh),
+  **skiny** dráčka (`SKINS`) a **oblečení** (`CLOTHES`: hlava / obličej / tělo). Katalog je v `SHOP_ITEMS`, stav nákupů v `SHOP`.
+- Obchod jde otevřít ve hře i na obrazovce „level splněn“, hra se při něm zastaví (včetně hudby). Ovládá se klávesami i dotykem.
+- Nákupy se neukládají (po obnovení stránky jsou pryč) a po výhře se nulují.

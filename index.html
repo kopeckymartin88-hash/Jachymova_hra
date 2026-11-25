@@ -2,7 +2,9 @@
 <html lang="cs">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
 <title>Dráček – plošinovka</title>
 <style>
   html, body { margin: 0; height: 100%; background: #14121f; color: #e8e6f0;
@@ -12,12 +14,37 @@
     background: #87ceeb; border-radius: 8px; box-shadow: 0 8px 40px #0008; }
   p { margin: 0; font-size: 14px; opacity: .75; text-align: center; padding: 0 12px; }
   kbd { background: #2c2840; border-radius: 4px; padding: 1px 6px; font-size: 13px; }
+  canvas { touch-action: none; -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; }
+
+  /* ---- dotykové ovládání (tablet / telefon) ---- */
+  body.touch { gap: 0; overflow: hidden; touch-action: none; }
+  body.touch canvas { width: min(100vw, calc(100vh * 800 / 480)); border-radius: 0; box-shadow: none; }
+  body.touch p { display: none; }
+  #touch { display: none; position: fixed; inset: 0; pointer-events: none; z-index: 10; }
+  body.touch #touch { display: block; }
+  #touch .grp { display: none; position: absolute; bottom: calc(16px + env(safe-area-inset-bottom)); gap: 14px; align-items: flex-end; }
+  body.touch[data-ui="play"] #touch .grp { display: flex; }
+  #tpad { left: calc(14px + env(safe-area-inset-left)); }
+  #tact { right: calc(14px + env(safe-area-inset-right)); }
+  .tb { pointer-events: auto; width: 78px; height: 78px; border-radius: 50%; border: 3px solid rgba(255,255,255,.6);
+        background: rgba(20,18,40,.42); color: #fff; font-size: 30px; line-height: 1; padding: 0; margin: 0;
+        touch-action: none; -webkit-tap-highlight-color: transparent; user-select: none; -webkit-user-select: none; }
+  .tb.on { background: rgba(255,217,59,.6); border-color: #ffd93b; }
+  .tb.jump { width: 98px; height: 98px; font-size: 40px; }
+  .tb.fire { opacity: .4; }
+  body.canfire .tb.fire { opacity: 1; }
+  #tdown { display: none; }
+  body.flying #tdown { display: block; }
 </style>
 </head>
 <body>
 <canvas id="game" width="800" height="480"></canvas>
+<div id="touch">
+  <div class="grp" id="tpad"><button class="tb" data-k="ArrowLeft" aria-label="doleva">◀</button><button class="tb" data-k="ArrowRight" aria-label="doprava">▶</button></div>
+  <div class="grp" id="tact"><button class="tb" id="tdown" data-k="ArrowDown" aria-label="dolů">▼</button><button class="tb fire" data-k="KeyF" aria-label="oheň">🔥</button><button class="tb jump" data-k="Space" aria-label="skok">▲</button></div>
+</div>
 <p><kbd>←</kbd><kbd>→</kbd> / <kbd>A</kbd><kbd>D</kbd> chůze · <kbd>↑</kbd> / <kbd>W</kbd> / <kbd>Mezerník</kbd> skok (2× = dvojskok) ·
-   <kbd>Shift</kbd> / <kbd>F</kbd> oheň (z bonusu) · <kbd>↑</kbd>/<kbd>↓</kbd> při létání · <kbd>P</kbd> pauza · <kbd>M</kbd> zvuk</p>
+   <kbd>Shift</kbd> / <kbd>F</kbd> oheň · <kbd>↑</kbd>/<kbd>↓</kbd> při létání · <kbd>B</kbd> obchod · <kbd>P</kbd> pauza · <kbd>M</kbd> zvuky · <kbd>H</kbd> hudba</p>
 
 <script>
 "use strict";
@@ -25,7 +52,7 @@
 //  Základní konstanty
 // ============================================================
 // Verze hry – s každým pushem se zvýší (0.0 → 0.1 → 0.2 …), viz CLAUDE.md a bump-version.sh
-const VERSION = '0.3';
+const VERSION = '0.4';
 
 const T = 32;                 // velikost dlaždice
 const VW = 800, VH = 480;     // velikost obrazovky
@@ -50,11 +77,14 @@ const GAME_KEYS = new Set(['ArrowLeft','ArrowRight','ArrowUp','ArrowDown','Space
 addEventListener('keydown', e => {
   if (GAME_KEYS.has(e.code)) e.preventDefault();
   initAudio();
+  if (G.shopOpen) { e.preventDefault(); if (!e.repeat || e.code.startsWith('Arrow')) shopKey(e.code); return; }
   if (!e.repeat) {
     if (e.code === 'ArrowUp' || e.code === 'KeyW' || e.code === 'Space') jumpBuf = 8;
     if (e.code === 'Enter' || e.code === 'Space') pressedEnter = true;
     if (e.code === 'KeyP' && G.state === 'play') G.paused = !G.paused;
-    if (e.code === 'KeyM') G.muted = !G.muted;
+    if (e.code === 'KeyM') G.muted = !G.muted;                 // M = zvuky
+    if (e.code === 'KeyH') G.musicOff = !G.musicOff;           // H = hudba
+    if (e.code === 'KeyB') openShop();                         // B = obchod
   }
   keys[e.code] = true;
 });
@@ -310,10 +340,10 @@ function musicTempo(mult) {                                      // zrychlení/z
 
 function musicTick() {
   if (!AC || !mus.master) return;
-  mus.master.gain.value = G.muted ? 0 : 0.6;
+  mus.master.gain.value = G.musicOff ? 0 : 0.6;
   if (!mus.playing) return;
   const active = G.state === 'play' || (mus.finale && G.state === 'win');
-  if (G.paused || !active) { mus.wasPaused = true; return; }
+  if (G.paused || G.shopOpen || !active) { mus.wasPaused = true; return; }
   const now = AC.currentTime;
   if (mus.wasPaused) {                                           // po pauze naváže od místa, kde skončila
     mus.wasPaused = false;
@@ -581,17 +611,22 @@ function startLevel(n) {
   G.level = n; buildLevel(n);
   P = newPlayer(2 * T);
   G.cam = 0; G.state = 'play'; G.paused = false; G.banner = 170;
-  G.finaleStarted = false;
+  G.finaleStarted = false; G.shopOpen = false;
   musicPlay(n);                                          // hudba daného levelu
 }
 
 function newPlayer(x) {
   return { x, y: GROUND_ROW * T - 28, w: 24, h: 28, vx: 0, vy: 0, face: 1, ground: false,
-           coyote: 0, airJumped: false, fire: 0, wings: 0, wheels: 0, spin: 0, wrot: 0, hintCd: 0, invuln: 0, fireCd: 0, breath: 0, anim: 0 };
+           coyote: 0, airJumped: false, shield: !!SHOP.owned.shield, fire: 0, wings: 0, wheels: 0, spin: 0, wrot: 0, hintCd: 0, invuln: 0, fireCd: 0, breath: 0, anim: 0 };
 }
 function newGame() {
   G.score = 0; G.coins = 0; G.lives = 3; G.time = 0; G.paused = false;
+  resetShop();
   startLevel(START_LEVEL);
+}
+function continueGame() {              // po konci hry pokračuje v levelu, kde hráč zemřel (body i nákupy zůstávají)
+  G.lives = 3; G.paused = false;
+  startLevel(G.level);
 }
 
 // ============================================================
@@ -684,9 +719,10 @@ function collectItem(it) {
     puff(it.x + 12, it.y + 12, '#ffd93b', 10);
     return;
   }
-  if (it.type === 'fire') p.fire = 3600;
-  if (it.type === 'wings') p.wings = 600;
-  if (it.type === 'shroom') p.wheels = 1800;
+  const ml = SHOP.owned.longer ? 1.5 : 1;                // „Delší bonusy“ z obchodu
+  if (it.type === 'fire') p.fire = Math.round(3600 * ml);
+  if (it.type === 'wings') p.wings = Math.round(600 * ml);
+  if (it.type === 'shroom') p.wheels = Math.round(1800 * ml);
   G.score += 100;
   popup(it.x - 10, it.y - 10, BONUS_NAMES[it.type], '#7dffb0');
   sfx.power();
@@ -791,6 +827,11 @@ function updateBoss(e, p) {
 }
 
 function loseLife(fell) {
+  if (!fell && P.shield) {                              // štít z obchodu pohltí jeden zásah za level
+    P.shield = false; P.invuln = 90;
+    popup(P.x - 10, P.y - 20, 'ŠTÍT!', '#9ad1ff'); sfx.stomp(); puff(P.x + 12, P.y + 14, '#9ad1ff', 10);
+    return;
+  }
   G.lives--;
   sfx.hurt();
   if (G.lives <= 0) { G.state = 'over'; sfx.over(); return; }
@@ -798,7 +839,7 @@ function loseLife(fell) {
     const sx = checkpoint.reached ? checkpoint.spawnX : 2 * T;
     const old = P;
     P = newPlayer(sx);
-    P.invuln = 90; P.fire = old.fire; P.wings = old.wings; P.wheels = old.wheels;
+    P.invuln = 90; P.fire = old.fire; P.wings = old.wings; P.wheels = old.wheels; P.shield = old.shield;
   } else {
     P.invuln = 120; P.vy = -6; P.vx = -P.face * 4;
   }
@@ -814,7 +855,7 @@ function updatePlay() {
   const fireKey = keys.ShiftLeft || keys.ShiftRight || keys.KeyF || keys.KeyX;
 
   // chůze
-  const maxV = 3.3, accel = 0.5, fric = 0.4;
+  const maxV = SHOP.owned.speed ? 3.63 : 3.3, accel = 0.5, fric = 0.4;
   if (p.invuln < 105 || p.vy >= 0 || true) {
     if (dir) { p.vx = clamp(p.vx + dir * accel * (p.ground ? 1 : 0.85), -maxV, maxV); p.face = dir; }
     else if (Math.abs(p.vx) < fric) p.vx = 0;
@@ -868,15 +909,15 @@ function updatePlay() {
   // oheň
   if (p.fireCd > 0) p.fireCd--;
   if (p.breath > 0) p.breath--;
-  if (fireKey && p.fire > 0 && p.fireCd <= 0) {
+  if (fireKey && (p.fire > 0 || SHOP.owned.fire) && p.fireCd <= 0) {
     fireballs.push({ x: p.x + (p.face > 0 ? p.w : -10), y: p.y + 6, w: 10, h: 10, vx: p.face * 6 + p.vx * 0.3, vy: 0, life: 110 });
-    p.fireCd = 22; p.breath = 10; sfx.fire();
+    p.fireCd = SHOP.owned.fastfire ? 12 : 22; p.breath = 10; sfx.fire();
   }
   if (p.invuln > 0) p.invuln--;
   if (p.fire > 0) p.fire--;
   if (p.wings > 0) { p.wings--; p.spin += 0.7; }
   if (p.wheels > 0) p.wheels--;
-  if (fireKey && p.fire <= 0 && p.hintCd <= 0) { p.hintCd = 240; popup(p.x - 10, p.y - 14, 'Oheň je v ? blocích', '#ffb27a'); }
+  if (fireKey && p.fire <= 0 && !SHOP.owned.fire && p.hintCd <= 0) { p.hintCd = 240; popup(p.x - 10, p.y - 14, 'Oheň: bonus v ? bloku nebo obchod', '#ffb27a'); }
   if (p.hintCd > 0) p.hintCd--;
 
   // ohňové koule
@@ -1503,12 +1544,33 @@ function drawWheel(x, y, r, rot) {
   ctx.restore();
 }
 
+// ===== skiny dráčka =====
+const SKINS = [
+  { id: 'green',   name: 'Zelený (základní)', price: 0,    body: '#3cb44b', dark: '#2a8f39', wing: '#7fd68b', belly: '#f6e58d', accent: '#ff8c42', desc: 'Klasický zelený dráček.' },
+  { id: 'blue',    name: 'Modrý',             price: 500,  body: '#3c8ee0', dark: '#2a6db0', wing: '#8fc4f5', belly: '#f6f0c0', accent: '#ffd24a', desc: 'Dráček v barvě moře.' },
+  { id: 'red',     name: 'Červený',           price: 500,  body: '#e0463c', dark: '#a8302a', wing: '#f59a8f', belly: '#ffe3b0', accent: '#ffd24a', desc: 'Ohnivý červený dráček.' },
+  { id: 'pink',    name: 'Růžový',            price: 600,  body: '#f06ab4', dark: '#c04a8a', wing: '#f9a8d8', belly: '#fff0c8', accent: '#7a2fd0', desc: 'Cukrově růžový dráček.' },
+  { id: 'purple',  name: 'Fialový',           price: 800,  body: '#8a54d6', dark: '#6438a8', wing: '#b99af0', belly: '#f2e0ff', accent: '#ffcf3a', desc: 'Tajemný fialový dráček.' },
+  { id: 'gold',    name: 'Zlatý',             price: 3000, body: '#f2c230', dark: '#c99700', wing: '#ffe27a', belly: '#fff6c8', accent: '#d33b3b', desc: 'Třpytivý zlatý drak pro opravdové šampiony.' },
+  { id: 'rainbow', name: 'Duhový',            price: 5000, body: '#fff',    dark: '#fff',    wing: '#fff',    belly: '#fff6d0', accent: '#fff',    desc: 'Barvy se plynule střídají, jako duha.' },
+];
+function animT() { return G.time + (G.shopOpen ? Math.floor(SH.anim * 20) : 0); }
+function dragonPalette(id) {
+  if (id === 'rainbow') {
+    const h = (animT() * 3) % 360;
+    return { body: `hsl(${h},75%,55%)`, dark: `hsl(${h},65%,38%)`, wing: `hsl(${(h + 60) % 360},80%,72%)`, belly: '#fff6d0', accent: `hsl(${(h + 180) % 360},85%,60%)` };
+  }
+  return SKINS.find(k => k.id === id) || SKINS[0];
+}
+function shopFx(over) { return Object.assign({ skin: SHOP.skin, head: SHOP.head, face: SHOP.face, body: SHOP.body }, over || {}); }
+
 function drawDragon(cx, bottom, face, phase, airborne, vy, breath, scale = 1, blink = false, fx = {}) {
   ctx.save();
   ctx.translate(cx, bottom);
   ctx.scale(face * scale, scale);
 
-  const green = '#3cb44b', dark = '#2a8f39', belly = '#f6e58d', accent = '#ff8c42';
+  const pal = dragonPalette(fx.skin);
+  const green = pal.body, dark = pal.dark, belly = pal.belly, accent = pal.accent;
   const legSwing = airborne ? 0 : Math.sin(phase * 2) * 4;
 
   // ocas (při létání se točí jako vrtule)
@@ -1527,7 +1589,7 @@ function drawDragon(cx, bottom, face, phase, airborne, vy, breath, scale = 1, bl
 
   // křídlo (za tělem)
   const flap = airborne ? (vy < 0 ? -1 : 0.4) : Math.sin(phase * 0.6) * 0.15;
-  ctx.fillStyle = '#7fd68b';
+  ctx.fillStyle = pal.wing;
   ctx.beginPath();
   ctx.moveTo(-4, -17);
   ctx.lineTo(-17, -29 - flap * 8);
@@ -1537,6 +1599,15 @@ function drawDragon(cx, bottom, face, phase, airborne, vy, breath, scale = 1, bl
   ctx.fill();
   ctx.fillStyle = dark;
   ctx.fillRect(-4, -19, 3, 3);
+
+  // plášť (za tělem)
+  if (fx.body === 'cape') {
+    const fl = Math.sin(phase * 1.5) * 2 + (airborne ? 3 : 0);
+    ctx.fillStyle = '#d6303f';
+    ctx.beginPath(); ctx.moveTo(-1, -23); ctx.lineTo(-21 - fl, -10 + fl * 0.5); ctx.lineTo(-18 - fl, -1); ctx.lineTo(-6, -3); ctx.lineTo(6, -20); ctx.closePath(); ctx.fill();
+    ctx.fillStyle = '#9c1c2a';
+    ctx.beginPath(); ctx.moveTo(-1, -23); ctx.lineTo(-21 - fl, -10 + fl * 0.5); ctx.lineTo(-15 - fl * 0.7, -9); ctx.closePath(); ctx.fill();
+  }
 
   // zadní nohy (s traktorem je nahradí kola)
   if (!fx.wheels) {
@@ -1590,6 +1661,49 @@ function drawDragon(cx, bottom, face, phase, airborne, vy, breath, scale = 1, bl
   // tvářička
   ctx.fillStyle = 'rgba(255,120,120,.55)';
   ctx.beginPath(); ctx.arc(7, -18, 2.2, 0, 7); ctx.fill();
+
+  // oblečení: tělo (šála, motýlek, sponka pláště)
+  if (fx.body === 'scarf') {
+    const fl = Math.sin(phase * 1.5) * 1.5 + (airborne ? 2 : 0);
+    ctx.fillStyle = '#c92f2f'; ctx.beginPath(); ctx.moveTo(-6, -16); ctx.lineTo(-11 - fl, -7); ctx.lineTo(-7 - fl, -5); ctx.lineTo(-2, -14); ctx.fill();
+    ctx.strokeStyle = '#e6403f'; ctx.lineWidth = 4; ctx.lineCap = 'round';
+    ctx.beginPath(); ctx.moveTo(-6, -16); ctx.quadraticCurveTo(2, -11, 10, -16); ctx.stroke();
+    ctx.strokeStyle = '#fff'; ctx.lineWidth = 1.2; ctx.beginPath(); ctx.moveTo(-1, -14.2); ctx.lineTo(0, -12); ctx.moveTo(4, -13.4); ctx.lineTo(5, -11.2); ctx.stroke();
+  } else if (fx.body === 'bow') {
+    ctx.fillStyle = '#d6303f';
+    ctx.beginPath(); ctx.moveTo(4, -13); ctx.lineTo(-3, -17); ctx.lineTo(-3, -9); ctx.closePath(); ctx.fill();
+    ctx.beginPath(); ctx.moveTo(4, -13); ctx.lineTo(11, -17); ctx.lineTo(11, -9); ctx.closePath(); ctx.fill();
+    ctx.fillStyle = '#8f1824'; ctx.beginPath(); ctx.arc(4, -13, 2.3, 0, 7); ctx.fill();
+  } else if (fx.body === 'cape') {
+    ctx.fillStyle = '#ffd24a'; ctx.beginPath(); ctx.arc(2, -15, 2.4, 0, 7); ctx.fill();
+  }
+  // oblečení: obličej (brýle, maska)
+  if (fx.face === 'shades') {
+    ctx.fillStyle = '#111'; ctx.beginPath(); ctx.ellipse(8.4, -24, 5, 3.8, 0, 0, 7); ctx.fill();
+    ctx.fillStyle = 'rgba(255,255,255,.4)'; ctx.fillRect(6.2, -26.2, 2.4, 1.4);
+    ctx.strokeStyle = '#111'; ctx.lineWidth = 1.5; ctx.beginPath(); ctx.moveTo(3.6, -24.6); ctx.lineTo(-2, -26); ctx.moveTo(13, -24); ctx.lineTo(16, -23); ctx.stroke();
+  } else if (fx.face === 'mask') {
+    ctx.fillStyle = '#1b1b2a'; ctx.beginPath(); ctx.ellipse(6.5, -24, 8.8, 4.4, 0, 0, 7); ctx.fill();
+    ctx.fillStyle = '#fff'; ctx.beginPath(); ctx.ellipse(8.6, -24, 3.4, 2.7, 0, 0, 7); ctx.fill();
+    ctx.fillStyle = '#112'; ctx.beginPath(); ctx.arc(9.6, -24, 1.5, 0, 7); ctx.fill();
+  }
+  // oblečení: hlava (kšiltovka, cylindr, korunka)
+  if (fx.head === 'cap') {
+    ctx.fillStyle = '#e04545'; ctx.beginPath(); ctx.arc(5, -24, 9, Math.PI, 0); ctx.closePath(); ctx.fill();
+    ctx.fillStyle = '#b32f2f'; ctx.beginPath(); ctx.ellipse(13.5, -24.4, 7.5, 2.3, 0, 0, 7); ctx.fill();
+    ctx.beginPath(); ctx.arc(5, -33, 1.6, 0, 7); ctx.fill();
+    ctx.fillStyle = 'rgba(255,255,255,.35)'; ctx.fillRect(1, -31, 5, 1.6);
+  } else if (fx.head === 'tophat') {
+    ctx.fillStyle = '#222'; ctx.fillRect(-1, -42, 12, 14);
+    ctx.fillStyle = '#c0392b'; ctx.fillRect(-1, -32, 12, 2.6);
+    ctx.fillStyle = '#222'; ctx.beginPath(); ctx.ellipse(5, -29, 11.5, 2.8, 0, 0, 7); ctx.fill();
+    ctx.fillStyle = 'rgba(255,255,255,.2)'; ctx.fillRect(1, -40, 2, 9);
+  } else if (fx.head === 'crown') {
+    ctx.fillStyle = '#ffd24a'; ctx.strokeStyle = '#b8860b'; ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(-2, -28); ctx.lineTo(-2, -36); ctx.lineTo(1.5, -32); ctx.lineTo(5, -39); ctx.lineTo(8.5, -32); ctx.lineTo(12, -36); ctx.lineTo(12, -28); ctx.closePath(); ctx.fill(); ctx.stroke();
+    ctx.fillStyle = '#e63946'; ctx.beginPath(); ctx.arc(5, -31, 1.6, 0, 7); ctx.fill();
+    ctx.fillStyle = '#3a8dde'; ctx.beginPath(); ctx.arc(0.5, -30, 1.1, 0, 7); ctx.arc(9.5, -30, 1.1, 0, 7); ctx.fill();
+  }
 
   // oheň z tlamy
   if (breath > 0) {
@@ -1848,12 +1962,203 @@ function drawHUD() {
     if (v <= 0) continue;
     ctx.globalAlpha = (v < 300 && Math.floor(v / 8) % 2 === 0) ? 0.35 : 1;
     ctx.fillStyle = 'rgba(0,0,0,.45)'; ctx.fillRect(16, by, 130, 18);
-    ctx.fillStyle = col; ctx.fillRect(16, by, 130 * v / max, 18);
+    ctx.fillStyle = col; ctx.fillRect(16, by, 130 * Math.min(1, v / (max * (SHOP.owned.longer ? 1.5 : 1))), 18);
     text(label + ' ' + Math.ceil(v / 60) + ' s', 22, by + 14, 13);
     ctx.globalAlpha = 1; by += 24;
   }
   text('SKÓRE ' + String(G.score).padStart(6, '0'), VW - 16, 32, 22, '#fff', 'right');
-  if (G.muted) text('🔇', VW - 16, 58, 16, '#fff', 'right');
+  if (G.touch) drawTouchButtons();
+  else {
+    text('B – obchod', VW - 16, VH - 10, 14, 'rgba(255,255,255,.85)', 'right');
+    if (G.muted) text('ZVUKY VYP (M)', VW - 16, 56, 13, '#ffd9d9', 'right');
+    if (G.musicOff) text('HUDBA VYP (H)', VW - 16, G.muted ? 72 : 56, 13, '#ffd9d9', 'right');
+  }
+}
+
+// ============================================================
+//  Obchod: za body se kupují vylepšení, skiny a oblečení (nic se neukládá)
+// ============================================================
+const SHOP_TABS = ['VYLEPŠENÍ', 'SKINY', 'OBLEČENÍ'];
+const CLOTHES = [
+  { id: 'cap',    slot: 'head', icon: '🧢', name: 'Kšiltovka',      price: 600,  desc: 'Sportovní červená kšiltovka.' },
+  { id: 'tophat', slot: 'head', icon: '🎩', name: 'Cylindr',        price: 1200, desc: 'Elegantní cylindr pro pravého gentlemana.' },
+  { id: 'crown',  slot: 'head', icon: '👑', name: 'Korunka',        price: 2500, desc: 'Zlatá koruna s drahokamy. Král všech dráčků.' },
+  { id: 'shades', slot: 'face', icon: '🕶️', name: 'Sluneční brýle', price: 800,  desc: 'Drsné černé brýle – cool dráček.' },
+  { id: 'mask',   slot: 'face', icon: '🎭', name: 'Maska hrdiny',   price: 700,  desc: 'Tajemná maska superhrdiny.' },
+  { id: 'scarf',  slot: 'body', icon: '🧣', name: 'Šála',           price: 700,  desc: 'Teplá červená šála vlající ve větru.' },
+  { id: 'bow',    slot: 'body', icon: '🎀', name: 'Motýlek',        price: 500,  desc: 'Slavnostní červený motýlek.' },
+  { id: 'cape',   slot: 'body', icon: '🦸', name: 'Plášť hrdiny',   price: 2000, desc: 'Rudý plášť, který se za tebou vlní.' },
+];
+const SHOP_ITEMS = [
+  [ { id: 'fire',     icon: '🔥', name: 'Ohnivý dech',    price: 3000, desc: 'Chrlení ohně (Shift / F / tlačítko) máš stále, i bez bonusu z bloku ?.' },
+    { id: 'fastfire', icon: '⚡', name: 'Rychlý oheň',    price: 2000, desc: 'Kratší pauza mezi výstřely – oheň šlehá téměř dvakrát rychleji.' },
+    { id: 'life',     icon: '❤️', name: 'Extra život',    price: 1000, desc: '+1 život (nejvýš 9). Dá se kupovat opakovaně.', repeat: true },
+    { id: 'shield',   icon: '🛡️', name: 'Štít',           price: 3000, desc: 'V každém levelu tě ochrání před prvním zásahem nepřítele.' },
+    { id: 'longer',   icon: '⏱️', name: 'Delší bonusy',   price: 3500, desc: 'Oheň, létání i traktor z bloků trvají o polovinu déle.' },
+    { id: 'speed',    icon: '👟', name: 'Rychlejší běh',  price: 2000, desc: 'Dráček běhá o 10 % rychleji.' } ],
+  SKINS.map(k => ({ id: k.id, name: k.name, price: k.price, desc: k.desc })),
+  CLOTHES,
+];
+const SHOP = { owned: {}, skin: 'green', head: null, face: null, body: null };
+const SH = { tab: 0, sel: 0, hits: [], anim: 0, msg: '', msgOk: true, msgT: 0 };
+const UI = { hits: [] };                                   // klikací oblasti dotykových tlačítek na plátně
+
+function resetShop() { SHOP.owned = {}; SHOP.skin = 'green'; SHOP.head = SHOP.face = SHOP.body = null; SH.tab = 0; SH.sel = 0; }
+function openShop() {
+  if ((G.state !== 'play' && G.state !== 'clear') || G.shopOpen) return;
+  G.shopOpen = true; jumpBuf = 0; SH.msgT = 0;
+  for (const k in keys) keys[k] = false;
+}
+function closeShop() { G.shopOpen = false; jumpBuf = 0; pressedEnter = false; for (const k in keys) keys[k] = false; }
+function shopTab(i) { SH.tab = (i + SHOP_TABS.length) % SHOP_TABS.length; SH.sel = 0; }
+function shopMsg(t, ok) { SH.msg = t; SH.msgOk = ok; SH.msgT = 160; }
+
+function itemState(tab, it) {
+  const afford = G.score >= it.price ? 'buy' : 'poor';
+  if (tab === 0) return it.repeat ? (G.lives >= 9 ? 'max' : afford) : (SHOP.owned[it.id] ? 'owned' : afford);
+  if (tab === 1) return SHOP.skin === it.id ? 'equipped' : (it.price === 0 || SHOP.owned[it.id]) ? 'owned' : afford;
+  return SHOP[it.slot] === it.id ? 'equipped' : SHOP.owned[it.id] ? 'owned' : afford;
+}
+
+function shopAct() {
+  const it = SHOP_ITEMS[SH.tab][SH.sel];
+  if (!it) return;
+  const st = itemState(SH.tab, it);
+  if (st === 'buy') {
+    G.score -= it.price;
+    if (SH.tab === 0) {
+      if (it.id === 'life') G.lives++;
+      else { SHOP.owned[it.id] = true; if (it.id === 'shield' && P) P.shield = true; }
+    } else if (SH.tab === 1) { SHOP.owned[it.id] = true; SHOP.skin = it.id; }
+    else { SHOP.owned[it.id] = true; SHOP[it.slot] = it.id; }
+    sfx.coin(); sfx.power(); shopMsg('Koupeno: ' + it.name + '!', true);
+  } else if (st === 'owned') {
+    if (SH.tab === 0) { sfx.bump(); shopMsg('Tohle už máš.', false); return; }
+    if (SH.tab === 1) SHOP.skin = it.id; else SHOP[it.slot] = it.id;
+    sfx.coin(); shopMsg('Nasazeno: ' + it.name, true);
+  } else if (st === 'equipped') {
+    if (SH.tab === 2) { SHOP[it.slot] = null; sfx.bump(); shopMsg('Sundáno: ' + it.name, true); }
+  } else if (st === 'poor') { sfx.bump(); shopMsg('Nemáš dost bodů (chybí ' + (it.price - G.score) + ').', false); }
+  else if (st === 'max') { sfx.bump(); shopMsg('Už máš maximum životů (9).', false); }
+}
+
+function shopKey(code) {
+  const n = SHOP_ITEMS[SH.tab].length;
+  if (code === 'KeyB' || code === 'Escape') closeShop();
+  else if (code === 'ArrowLeft' || code === 'KeyA') SH.sel = Math.max(0, SH.sel - 1);
+  else if (code === 'ArrowRight' || code === 'KeyD') SH.sel = Math.min(n - 1, SH.sel + 1);
+  else if (code === 'ArrowUp' || code === 'KeyW') SH.sel = Math.max(0, SH.sel - 2);
+  else if (code === 'ArrowDown' || code === 'KeyS') SH.sel = Math.min(n - 1, SH.sel + 2);
+  else if (code === 'KeyQ' || code === 'PageUp') shopTab(SH.tab - 1);
+  else if (code === 'KeyE' || code === 'PageDown') shopTab(SH.tab + 1);
+  else if (code === 'Digit1' || code === 'Digit2' || code === 'Digit3') shopTab(parseInt(code.slice(5), 10) - 1);
+  else if (code === 'Enter' || code === 'Space') shopAct();
+}
+function shopClick(x, y) {
+  for (let i = SH.hits.length - 1; i >= 0; i--) {
+    const h = SH.hits[i];
+    if (x >= h.x && x <= h.x + h.w && y >= h.y && y <= h.y + h.h) { h.fn(); return; }
+  }
+}
+
+function rr(x, y, w, h, r) {
+  ctx.beginPath(); ctx.moveTo(x + r, y); ctx.arcTo(x + w, y, x + w, y + h, r); ctx.arcTo(x + w, y + h, x, y + h, r);
+  ctx.arcTo(x, y + h, x, y, r); ctx.arcTo(x, y, x + w, y, r); ctx.closePath();
+}
+function wrapLines(str, maxW) {
+  ctx.font = '14px system-ui, sans-serif';
+  const lines = []; let cur = '';
+  for (const w of str.split(' ')) {
+    const t = cur ? cur + ' ' + w : w;
+    if (ctx.measureText(t).width > maxW && cur) { lines.push(cur); cur = w; } else cur = t;
+  }
+  if (cur) lines.push(cur);
+  return lines;
+}
+function shopBtn(x, y, w, h, label, fn, fill, size, color) {
+  rr(x, y, w, h, 9); ctx.fillStyle = fill; ctx.fill();
+  text(label, x + w / 2, y + h / 2 + (size || 16) * 0.35, size || 16, color || '#fff', 'center', false);
+  SH.hits.push({ x, y, w, h, fn });
+}
+function tapHint(label) { return (G.touch ? 'Klepni – ' : 'ENTER – ') + label; }
+
+function drawShop() {
+  SH.anim += 0.06; if (SH.msgT > 0) SH.msgT--;
+  SH.hits.length = 0;
+  overlay(0.76);
+  const items = SHOP_ITEMS[SH.tab], it = items[SH.sel] || items[0];
+  rr(24, 14, 752, 452, 16); ctx.fillStyle = 'rgba(22,17,44,.97)'; ctx.fill(); ctx.strokeStyle = '#ffd93b'; ctx.lineWidth = 2; ctx.stroke();
+  text('OBCHOD', 46, 54, 30, '#ffd93b', 'left', false);
+  text('BODY  ' + G.score, 400, 54, 24, '#fff', 'center', false);
+  shopBtn(682, 24, 82, 38, '✕ Zavřít', closeShop, '#8a2a3a', 15);
+  SHOP_TABS.forEach((nm, i) => shopBtn(46 + i * 158, 74, 150, 36, nm, () => shopTab(i), i === SH.tab ? '#ffb100' : '#3a3558', 15, i === SH.tab ? '#2a1a00' : '#fff'));
+
+  items.forEach((c, i) => {
+    const x = 46 + (i % 2) * 260, y = 124 + Math.floor(i / 2) * 66, w = 250, h = 58;
+    const st = itemState(SH.tab, c), sel = i === SH.sel;
+    rr(x, y, w, h, 10); ctx.fillStyle = st === 'equipped' ? '#1f4a5a' : st === 'owned' ? '#27423a' : '#2c2748'; ctx.fill();
+    ctx.lineWidth = sel ? 3 : 1; ctx.strokeStyle = sel ? '#ffd93b' : 'rgba(255,255,255,.18)'; ctx.stroke();
+    if (SH.tab === 1) {
+      const pl = dragonPalette(c.id);
+      ctx.fillStyle = pl.dark; ctx.beginPath(); ctx.arc(x + 29, y + 29, 17, 0, 7); ctx.fill();
+      ctx.fillStyle = pl.body; ctx.beginPath(); ctx.arc(x + 29, y + 29, 13, 0, 7); ctx.fill();
+    } else {
+      ctx.font = '28px system-ui, "Apple Color Emoji", "Segoe UI Emoji", sans-serif'; ctx.textAlign = 'center'; ctx.fillStyle = '#fff';
+      ctx.fillText(c.icon, x + 29, y + 39);
+    }
+    text(c.name, x + 54, y + 24, 16, '#fff', 'left', false);
+    let label, lc;
+    if (st === 'equipped') { label = '● Nasazeno'; lc = '#7fe8ff'; }
+    else if (st === 'owned') { label = SH.tab === 0 ? '✓ Koupeno' : '✓ Koupeno · nasadit'; lc = '#8affb0'; }
+    else if (st === 'max') { label = 'Maximum (9 životů)'; lc = '#aaa'; }
+    else { label = c.price + ' bodů'; lc = st === 'poor' ? '#ff9a9a' : '#ffd93b'; }
+    text(label, x + 54, y + 46, 14, lc, 'left', false);
+    SH.hits.push({ x, y, w, h, fn: () => { if (SH.sel === i) shopAct(); else SH.sel = i; } });
+  });
+
+  // náhled dráčka s vybranou věcí
+  rr(574, 122, 182, 258, 12); ctx.fillStyle = 'rgba(255,255,255,.07)'; ctx.fill();
+  text('NÁHLED', 665, 144, 13, '#bcb6ff', 'center', false);
+  ctx.fillStyle = 'rgba(255,255,255,.14)'; ctx.fillRect(594, 346, 142, 4);
+  const ov = SH.tab === 1 ? { skin: it.id } : SH.tab === 2 ? { [it.slot]: it.id } : {};
+  drawDragon(668, 346, 1, SH.anim, false, 0, 0, 3.2, Math.floor(SH.anim * 4) % 40 === 0, shopFx(ov));
+
+  // popis a tlačítko
+  rr(46, 388, 510, 68, 10); ctx.fillStyle = 'rgba(255,255,255,.07)'; ctx.fill();
+  if (SH.msgT > 0) text(SH.msg, 62, 428, 17, SH.msgOk ? '#8affb0' : '#ff9a9a', 'left', false);
+  else {
+    text(it.name, 62, 410, 17, '#ffd93b', 'left', false);
+    ctx.font = '14px system-ui, sans-serif'; ctx.textAlign = 'left'; ctx.fillStyle = '#d8d6f5';
+    wrapLines(it.desc, 480).slice(0, 2).forEach((l, i) => ctx.fillText(l, 62, 430 + i * 17));
+  }
+  const st = itemState(SH.tab, it);
+  let bl, bf;
+  if (st === 'buy') { bl = 'KOUPIT za ' + it.price; bf = '#2f9e44'; }
+  else if (st === 'owned') { bl = SH.tab === 0 ? 'KOUPENO' : 'NASADIT'; bf = SH.tab === 0 ? '#3b3b4d' : '#2a6fd0'; }
+  else if (st === 'equipped') { bl = SH.tab === 2 ? 'SUNDAT' : '✓ NASAZENO'; bf = SH.tab === 2 ? '#7a5a2a' : '#3b3b4d'; }
+  else if (st === 'poor') { bl = 'MÁLO BODŮ'; bf = '#7a2e2e'; }
+  else { bl = 'MAX ŽIVOTŮ'; bf = '#3b3b4d'; }
+  shopBtn(574, 392, 182, 60, bl, shopAct, bf, 17);
+  if (!G.touch) text('← ↑ ↓ → výběr · Q / E záložky · Enter koupit / nasadit · B zavřít', 400, 477, 13, 'rgba(255,255,255,.75)', 'center', false);
+}
+
+// dotyková tlačítka nakreslená na plátně (pauza, obchod, hudba, zvuky)
+function drawTouchButtons() {
+  const defs = [
+    { ic: G.paused ? '▶' : '❚❚', fs: 13, fn: () => { if (G.state === 'play') G.paused = !G.paused; } },
+    { ic: '🛒', fs: 17, fn: openShop },
+    { ic: '♪', fs: 22, off: G.musicOff, fn: () => { G.musicOff = !G.musicOff; } },
+    { ic: '🔊', fs: 16, off: G.muted, fn: () => { G.muted = !G.muted; } },
+  ];
+  defs.forEach((d, i) => {
+    const cx = VW - 28 - i * 46, cy = 92;
+    ctx.fillStyle = 'rgba(0,0,0,.45)'; ctx.beginPath(); ctx.arc(cx, cy, 19, 0, 7); ctx.fill();
+    ctx.strokeStyle = 'rgba(255,255,255,.5)'; ctx.lineWidth = 1.5; ctx.stroke();
+    ctx.font = d.fs + 'px system-ui, "Apple Color Emoji", "Segoe UI Emoji", sans-serif'; ctx.textAlign = 'center';
+    ctx.fillStyle = d.off ? 'rgba(255,255,255,.45)' : '#fff'; ctx.fillText(d.ic, cx, cy + d.fs * 0.35);
+    if (d.off) { ctx.strokeStyle = '#ff5a5a'; ctx.lineWidth = 3; ctx.beginPath(); ctx.moveTo(cx - 12, cy + 12); ctx.lineTo(cx + 12, cy - 12); ctx.stroke(); }
+    UI.hits.push({ x: cx - 22, y: cy - 22, w: 44, h: 44, fn: d.fn });
+  });
 }
 
 function overlay(alpha = 0.55) { ctx.fillStyle = `rgba(10,8,25,${alpha})`; ctx.fillRect(0, 0, VW, VH); }
@@ -1866,8 +2171,8 @@ function drawTitle() {
   overlay(0.25);
   text('DRÁČEK', VW / 2, 120, 76, '#ffd93b', 'center');
   text('plošinovka', VW / 2, 158, 26, '#fff', 'center');
-  drawDragon(VW / 2, 400, 1, G.time * 0.1, false, 0, (G.time % 120) < 10 ? 10 - (G.time % 120) : 0, 3.2, (G.time % 150) > 140);
-  if (Math.floor(G.time / 30) % 2 === 0) text('Stiskni ENTER nebo MEZERNÍK', VW / 2, 440, 24, '#fff', 'center');
+  drawDragon(VW / 2, 400, 1, G.time * 0.1, false, 0, (G.time % 120) < 10 ? 10 - (G.time % 120) : 0, 3.2, (G.time % 150) > 140, shopFx());
+  if (Math.floor(G.time / 30) % 2 === 0) text(G.touch ? 'Klepni na obrazovku' : 'Stiskni ENTER nebo MEZERNÍK', VW / 2, 440, 24, '#fff', 'center');
   text('Projdi 21 levelů, sbírej mince i životy a poraž Mimoně na hradě!', VW / 2, 200, 17, '#fff', 'center');
   text('Bonusy v blocích ?: oheň · létání · traktorová kola · truhlička', VW / 2, 228, 16, '#ffe066', 'center');
   text('Pozor na Pankáče: po prvním zásahu utíká, zničíš ho až druhým!', VW / 2, 254, 15, '#ffb27a', 'center');
@@ -1882,9 +2187,10 @@ function drawEnd(win) {
   } else {
     text('KONEC HRY', VW / 2, 180, 60, '#ff6b6b', 'center');
     text('Došel jsi do levelu ' + G.level + ' · skóre: ' + G.score, VW / 2, 232, 24, '#fff', 'center');
-    text('Hra se neukládá, začneš znovu od prvního levelu.', VW / 2, 266, 16, '#ffd9d9', 'center');
+    text('Pokračuješ znovu od levelu ' + G.level + ' se 3 životy,', VW / 2, 264, 17, '#ffd9d9', 'center');
+    text('body i nákupy z obchodu ti zůstávají (hra se neukládá).', VW / 2, 288, 15, '#ffd9d9', 'center');
   }
-  if (G.t2 > 45) text('ENTER – hrát znovu', VW / 2, 318, 22, '#fff', 'center');
+  if (G.t2 > 45) text(tapHint(win ? 'nová hra' : 'pokračovat v levelu ' + G.level), VW / 2, 338, 22, '#fff', 'center');
 }
 
 function drawClear() {
@@ -1894,7 +2200,8 @@ function drawClear() {
   const next = THEMES[G.level];
   const nm = G.level + 1 === LEVEL_COUNT ? 'BOSS – ' + next.name : next.name;
   text('Další: level ' + (G.level + 1) + ' – ' + nm, VW / 2, 262, 20, '#bfe6ff', 'center');
-  if (G.t2 > 45) text('ENTER – pokračovat', VW / 2, 312, 22, '#fff', 'center');
+  text(G.touch ? 'Obchod: ikona 🛒 vpravo nahoře' : 'B – obchod (utrať body za vylepšení)', VW / 2, 306, 16, '#ffe066', 'center');
+  if (G.t2 > 45) text(tapHint('další level'), VW / 2, 352, 22, '#fff', 'center');
 }
 
 function drawPlay() {
@@ -1909,7 +2216,12 @@ function drawPlay() {
   const p = P;
   const flicker = p.invuln > 0 && Math.floor(p.invuln / 4) % 2 === 0;
   if (!flicker) drawDragon(p.x + p.w / 2 - G.cam, p.y + p.h, p.face, p.anim, !p.ground, p.vy, p.breath, 1, false,
-    { flying: p.wings > 0, spin: p.spin, wheels: p.wheels > 0, wheelRot: p.wrot });
+    shopFx({ flying: p.wings > 0, spin: p.spin, wheels: p.wheels > 0, wheelRot: p.wrot }));
+  if (p.shield) {                                                  // štít z obchodu
+    const sx = p.x + p.w / 2 - G.cam, sy = p.y + p.h / 2;
+    ctx.fillStyle = 'rgba(150,210,255,.16)'; ctx.beginPath(); ctx.arc(sx, sy, 25, 0, 7); ctx.fill();
+    ctx.strokeStyle = 'rgba(170,225,255,' + (0.6 + 0.3 * Math.sin(G.time * 0.15)) + ')'; ctx.lineWidth = 2; ctx.stroke();
+  }
   drawParticles();
   drawHUD();
   if (G.banner > 0) {
@@ -1936,11 +2248,14 @@ function tick() {
     G.time++;
     if (pressedEnter) newGame();
   } else if (G.state === 'play') {
-    if (!G.paused) updatePlay();
+    if (!G.paused && !G.shopOpen) updatePlay();
   } else {
     G.time++; G.t2++;                                      // krátká prodleva, ať Enter/skok hned nepřeskočí obrazovku
-    if (pressedEnter && G.t2 > 45) {
-      if (G.state === 'clear') startLevel(G.level + 1); else newGame();
+    if (G.shopOpen && G.state !== 'clear') G.shopOpen = false;
+    if (pressedEnter && G.t2 > 45 && !G.shopOpen) {
+      if (G.state === 'clear') startLevel(G.level + 1);
+      else if (G.state === 'over') continueGame();
+      else newGame();
     }
   }
   pressedEnter = false;
@@ -1951,13 +2266,54 @@ function frame(now) {
   while (acc >= STEP) { tick(); acc -= STEP; }
 
   ctx.clearRect(0, 0, VW, VH);
+  UI.hits.length = 0;
   if (G.state === 'title') drawTitle();
   else { drawPlay(); if (G.state === 'win') drawEnd(true); else if (G.state === 'over') drawEnd(false); else if (G.state === 'clear') drawClear(); }
-  text('v' + VERSION, 10, VH - 10, 14, 'rgba(255,255,255,.85)');      // verze v levém dolním rohu
+  if (G.shopOpen) drawShop();
+  text('v' + VERSION, 10, VH - 10, 14, 'rgba(255,255,255,.85)');
+  syncTouchUI();      // verze v levém dolním rohu
   requestAnimationFrame(frame);
 }
 
-G.level = 1; G.banner = 0; G.t2 = 0;
+// ---------- dotykové ovládání (tablet) ----------
+function setTouch(v) { if (G.touch === v) return; G.touch = v; document.body.classList.toggle('touch', v); }
+let uiLast = '', canFireLast = -1, flyLast = -1;
+function syncTouchUI() {                                   // přepíná viditelnost dotykových tlačítek podle stavu hry
+  const ui = G.shopOpen ? 'shop' : (G.paused && G.state === 'play') ? 'paused' : G.state;
+  if (ui !== uiLast) { uiLast = ui; document.body.dataset.ui = ui; }
+  const cf = (P && (P.fire > 0 || SHOP.owned.fire)) ? 1 : 0, fl = (P && P.wings > 0) ? 1 : 0;
+  if (cf !== canFireLast) { canFireLast = cf; document.body.classList.toggle('canfire', !!cf); }
+  if (fl !== flyLast) { flyLast = fl; document.body.classList.toggle('flying', !!fl); }
+}
+document.querySelectorAll('#touch .tb').forEach(btn => {
+  const k = btn.dataset.k;
+  const down = e => {
+    e.preventDefault(); initAudio(); setTouch(true);
+    keys[k] = true; if (k === 'Space') jumpBuf = 8;
+    btn.classList.add('on'); try { btn.setPointerCapture(e.pointerId); } catch (_) {}
+  };
+  const up = e => { e.preventDefault(); keys[k] = false; btn.classList.remove('on'); };
+  btn.addEventListener('pointerdown', down);
+  ['pointerup', 'pointercancel', 'lostpointercapture'].forEach(ev => btn.addEventListener(ev, up));
+  btn.addEventListener('contextmenu', e => e.preventDefault());
+});
+canvas.addEventListener('pointerdown', e => {              // klepnutí/klik na plátno: menu, obchod, tlačítka v rohu
+  initAudio();
+  if (e.pointerType === 'touch') setTouch(true);
+  const r = canvas.getBoundingClientRect(), x = (e.clientX - r.left) * VW / r.width, y = (e.clientY - r.top) * VH / r.height;
+  if (G.shopOpen) { shopClick(x, y); return; }
+  if (G.state === 'play' || G.state === 'clear') {
+    for (const h of UI.hits) if (x >= h.x && x <= h.x + h.w && y >= h.y && y <= h.y + h.h) { h.fn(); return; }
+  }
+  if (G.state === 'play') { if (G.paused) G.paused = false; }
+  else pressedEnter = true;
+});
+canvas.addEventListener('contextmenu', e => e.preventDefault());
+addEventListener('touchstart', () => setTouch(true), { passive: true });
+document.addEventListener('visibilitychange', () => { if (document.hidden && G.state === 'play') G.paused = true; });
+setTouch(!!(window.matchMedia && matchMedia('(pointer: coarse)').matches));
+
+G.level = 1; G.banner = 0; G.t2 = 0; G.shopOpen = false; G.musicOff = false;
 buildLevel(1);
 P = newPlayer(2 * T);
 requestAnimationFrame(frame);
