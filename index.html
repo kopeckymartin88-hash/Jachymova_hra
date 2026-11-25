@@ -24,6 +24,9 @@
 // ============================================================
 //  Základní konstanty
 // ============================================================
+// Verze hry – s každým pushem se zvýší (0.0 → 0.1 → 0.2 …), viz CLAUDE.md a bump-version.sh
+const VERSION = '0.0';
+
 const T = 32;                 // velikost dlaždice
 const VW = 800, VH = 480;     // velikost obrazovky
 const LW = 140, LH = 15;      // rozměry levelu v dlaždicích
@@ -1014,6 +1017,7 @@ function frame(now) {
   ctx.clearRect(0, 0, VW, VH);
   if (G.state === 'title') drawTitle();
   else { drawPlay(); if (G.state === 'win') drawEnd(true); else if (G.state === 'over') drawEnd(false); }
+  text('v' + VERSION, 10, VH - 10, 14, 'rgba(255,255,255,.85)');      // verze v levém dolním rohu
   requestAnimationFrame(frame);
 }
 
