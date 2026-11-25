@@ -169,7 +169,7 @@ function newPlayer(x) {
            coyote: 0, airJumped: false, fire: 0, wings: 0, wheels: 0, spin: 0, wrot: 0, hintCd: 0, invuln: 0, fireCd: 0, breath: 0, anim: 0 };
 }
 function newGame() {
-  G.score = 0; G.coins = 0; G.lives = 3; G.time = 0; G.paused = false; G.noBonus = 0;
+  G.score = 0; G.coins = 0; G.lives = 3; G.time = 0; G.paused = false;
   buildLevel();
   P = newPlayer(2 * T);
   G.cam = 0;
@@ -227,26 +227,24 @@ function puff(x, y, color, n = 6) {
 // ============================================================
 //  Aktualizace
 // ============================================================
-const BONUS_NAMES = { fire: 'OHEŇ! 60 s', wings: 'LÉTÁNÍ! 30 s', shroom: 'TRAKTOR! 30 s' };
+const BONUS_NAMES = { fire: 'OHEŇ! 60 s', wings: 'LÉTÁNÍ! 10 s', shroom: 'TRAKTOR! 30 s' };
 
 function spawnBonus(tx, ty, forced) {
-  const bag = [['coin', 22], ['chest', 20], ['fire', 22], ['wings', 18], ['shroom', 18]];
+  // šance v procentech (součet 100)
+  const bag = [['coin', 50], ['chest', 20], ['fire', 15], ['wings', 7.5], ['shroom', 7.5]];
   let type = forced;
   if (!type) {
-    // po dvou "prázdných" blocích v řadě padne vždy nějaký bonus
-    const pool = (G.noBonus || 0) >= 2 ? bag.filter(b => b[0] !== 'coin') : bag;
+    const pool = bag;
     let r = Math.random() * pool.reduce((sum, b) => sum + b[1], 0);
     for (const [name, w] of pool) { r -= w; if (r <= 0) { type = name; break; } }
     type = type || pool[0][0];
   }
   if (type === 'coin') {
-    G.noBonus = (G.noBonus || 0) + 1;
     G.coins++; G.score += 100;
     popup(tx * T + 8, ty * T - 6, '+100', '#ffe066'); sfx.coin();
     puff(tx * T + 16, ty * T, '#ffd93b', 5);
     return;
   }
-  G.noBonus = 0;
   items.push({ type, x: tx * T + 4, baseY: ty * T - 24, y: ty * T, w: 24, h: 24, t: 0, got: false });
   sfx.bump();
 }
@@ -259,7 +257,7 @@ function collectItem(it) {
     return;
   }
   if (it.type === 'fire') p.fire = 3600;
-  if (it.type === 'wings') p.wings = 1800;
+  if (it.type === 'wings') p.wings = 600;
   if (it.type === 'shroom') p.wheels = 1800;
   G.score += 100;
   popup(it.x - 10, it.y - 10, BONUS_NAMES[it.type], '#7dffb0');
@@ -929,7 +927,7 @@ function drawHUD() {
   ctx.fillStyle = '#ffd93b'; ctx.beginPath(); ctx.arc(26, 58, 8, 0, 7); ctx.fill();
   ctx.fillStyle = '#c99700'; ctx.fillRect(24, 52, 3, 12);
   text('× ' + G.coins, 42, 65, 18);
-  const powers = [['fire', 'OHEŇ', '#ff7a1a', 3600], ['wings', 'LÉTÁNÍ', '#3cb44b', 1800], ['wheels', 'TRAKTOR', '#d94040', 1800]];
+  const powers = [['fire', 'OHEŇ', '#ff7a1a', 3600], ['wings', 'LÉTÁNÍ', '#3cb44b', 600], ['wheels', 'TRAKTOR', '#d94040', 1800]];
   let by = 82;
   for (const [k, label, col, max] of powers) {
     const v = P[k];
