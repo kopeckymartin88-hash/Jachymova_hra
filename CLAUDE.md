@@ -20,3 +20,6 @@ https://kopeckymartin88-hash.github.io/Jachymova_hra/
 - Každý level má vlastní motiv prostředí v poli `THEMES` (barvy, pozadí, počasí, vzhled dlaždic i děr).
 - Hra se neukládá. Po konci hry začíná hráč znovu od levelu 1. Životy se dají získat srdíčky 1UP a každými 50 mincemi (max. 9).
 - Pro zkoušení lze hru spustit od libovolného levelu: `index.html?level=12`.
+- Překážky, které vypadají jako **záchody** (dlaždice `T`, 2 široké, 1–3 vysoké), nahradily původní roury. Víko a sedátko mají barvu motivu.
+- Boss Mimoň **háže banány** (`throwBanana`, `updateBananas`): letí obloukem k hráči, dá se jim uhnout nebo je sestřelit ohněm; ve zuřivé fázi hází dva naráz.
+  Frekvenci hodů nastavují `BOSS.banana` / `BOSS.bananaRage` (snímky mezi hody).
