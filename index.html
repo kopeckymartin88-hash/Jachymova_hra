@@ -25,11 +25,15 @@
 //  Základní konstanty
 // ============================================================
 // Verze hry – s každým pushem se zvýší (0.0 → 0.1 → 0.2 …), viz CLAUDE.md a bump-version.sh
-const VERSION = '0.0';
+const VERSION = '0.1';
 
 const T = 32;                 // velikost dlaždice
 const VW = 800, VH = 480;     // velikost obrazovky
-const LW = 140, LH = 15;      // rozměry levelu v dlaždicích
+let LW = 140;                // šířka levelu v dlaždicích (mění se podle levelu)
+const LH = 15;               // výška levelu v dlaždicích
+const LEVEL_COUNT = 21;      // celkem levelů (poslední je boss)
+// ?level=N v adrese hry spustí hru rovnou od levelu N (jen pro zkoušení)
+const START_LEVEL = Math.min(LEVEL_COUNT, Math.max(1, parseInt(new URLSearchParams(location.search).get('level'), 10) || 1));
 const GROUND_ROW = 13;
 
 const canvas = document.getElementById('game');
@@ -102,7 +106,8 @@ let grid, coinsList, enemies, fireballs, particles, bumps, items, P, checkpoint;
 // ============================================================
 //  Level (sestavený programově)
 // ============================================================
-function buildLevel() {
+function buildLevel1() {
+  LW = 140;
   grid = Array.from({ length: LH }, () => Array(LW).fill(' '));
   coinsList = []; enemies = []; fireballs = []; particles = []; bumps = {}; items = [];
 
@@ -164,8 +169,185 @@ function buildLevel() {
       w: 22, h: 38, vx: 0, vy: 0, dir: i % 2 ? 1 : -1, dead: false, timer: 0, anim: 0, hits: 0, panic: false, stun: 0 }));
 
   checkpoint = { x: 66 * T, reached: false, spawnX: 64 * T };
+  items.push(lifeItem(62, 5));                         // 1UP srdíčko nad vysokou plošinou
 }
-function flagX() { return 134 * T; }
+// ============================================================
+//  Levely 2–21: generátor podle obtížnosti + hradní aréna s bossem
+// ============================================================
+let LV = { n: 1, name: '', theme: null, boss: false };
+function flagX() { return (LW - 6) * T; }
+
+function mulberry32(a) {
+  return function () {
+    a |= 0; a = a + 0x6D2B79F5 | 0;
+    let t = Math.imul(a ^ a >>> 15, 1 | a);
+    t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+    return ((t ^ t >>> 14) >>> 0) / 4294967296;
+  };
+}
+
+// pomocné funkce pro stavbu levelu (pracují s globálními grid / coinsList / enemies / items)
+function setT(x, y, t) { if (x >= 0 && x < LW && y >= 0 && y < LH) grid[y][x] = t; }
+function groundCols(x1, x2) { for (let x = x1; x <= x2; x++) { setT(x, 13, '#'); setT(x, 14, '#'); } }
+function brickRow(x, y, n, t = 'B') { for (let i = 0; i < n; i++) setT(x + i, y, t); }
+function pipeAt(x, h) { for (let i = 0; i < h; i++) { setT(x, 12 - i, 'T'); setT(x + 1, 12 - i, 'T'); } }
+function towerAt(x, h) { for (let i = 0; i < h; i++) setT(x, 12 - i, 'B'); }
+function coinAt(x, y) { coinsList.push({ x: x * T + 8, y: y * T + 6, w: 16, h: 20, got: false }); }
+function coinRowAt(x, y, n) { for (let i = 0; i < n; i++) coinAt(x + i, y); }
+function pacAt(tx, floorRow, spd, dir) {
+  enemies.push({ x: tx * T + 2, y: floorRow * T - 26, w: 28, h: 26, vx: 0, vy: 0, dir, dead: false, timer: 0, anim: Math.random() * 6, spd });
+}
+function stickAt(tx, floorRow, spd, dir) {
+  enemies.push({ type: 'stick', x: tx * T + 5, y: floorRow * T - 38, w: 22, h: 38, vx: 0, vy: 0, dir, dead: false, timer: 0,
+                 anim: 0, hits: 0, panic: false, stun: 0, spd });
+}
+function lifeItem(tx, ty) {
+  return { type: 'life', x: tx * T + 4, baseY: ty * T + 4, y: ty * T + 4, w: 24, h: 24, t: 99, got: false };
+}
+function cellsFree(x1, y1, x2, y2) {
+  for (let y = y1; y <= y2; y++) for (let x = x1; x <= x2; x++) {
+    if (x < 0 || x >= LW) return false;
+    if (y >= 0 && y < LH && grid[y][x] !== ' ') return false;
+  }
+  return true;
+}
+function groundSolid(x1, x2) {
+  for (let x = x1; x <= x2; x++) if (x < 0 || x >= LW || grid[13][x] !== '#') return false;
+  return true;
+}
+function resetWorld() { coinsList = []; enemies = []; fireballs = []; particles = []; bumps = {}; items = []; }
+
+// Level 2–20: délka, počet děr a nepřátel i jejich rychlost rostou s obtížností d (0 … 1)
+function genLevel(n) {
+  const rnd = mulberry32(n * 7919 + 101);
+  const ri = (a, b) => a + Math.floor(rnd() * (b - a + 1));
+  const d = (n - 2) / 18;
+  LW = Math.round(150 + d * 90);
+  grid = Array.from({ length: LH }, () => Array(LW).fill(' '));
+  resetWorld();
+
+  // 1) trať: rovné úseky a díry (nejvýš 4 dlaždice, to dráček s rozběhem přeskočí)
+  const segs = [[0, 11]], pits = [];
+  const pPit = 0.35 + 0.5 * d, maxW = d < 0.35 ? 3 : 4;
+  let x = 12;
+  while (x < LW - 24) {
+    const pit = rnd() < pPit;
+    const w = pit ? ri(2, maxW) : 0;
+    const L = ri(6, Math.max(7, Math.round(13 - 5 * d)));
+    if (pit) { pits.push([x, x + w - 1]); segs.push([x + w, x + w + L - 1]); x += w + L; }
+    else { segs[segs.length - 1][1] += L; x += L; }
+  }
+  segs[segs.length - 1][1] = LW - 1;
+  segs.forEach(([a, b]) => groundCols(a, b));
+
+  // 2) schody před cílem
+  for (let i = 0; i < 6; i++) for (let j = 0; j <= i; j++) setT(LW - 16 + i, 12 - j, '#');
+
+  // 3) roury a věžičky z cihel (daleko od okrajů děr)
+  const longSegs = segs.filter(([a, b]) => b - a >= 9 && b < LW - 20);
+  const nPipes = ri(1, 2) + Math.round(d * 5);
+  for (let k = 0; k < nPipes && longSegs.length; k++) {
+    const [a, b] = longSegs[ri(0, longSegs.length - 1)];
+    const px = ri(a + 3, b - 5);
+    const h = ri(1, d > 0.4 ? 3 : 2);
+    if (!cellsFree(px - 1, 8, px + 2, 12) || !groundSolid(px - 1, px + 2)) continue;
+    if (rnd() < 0.7) pipeAt(px, h); else towerAt(px, Math.min(3, h + 1));
+  }
+
+  // 4) 1UP srdíčka (mají přednost před ostatními plošinami): 1. na schůdkové plošince (dosažitelné normálním skokem), další tajná – vyžadují dvojskok
+  const nHearts = 1 + (n >= 8 ? 1 : 0) + (n >= 15 ? 1 : 0);
+  for (let h = 0; h < nHearts; h++) {
+    for (let tries = 0; tries < 800; tries++) {
+      const px = ri(26, LW - 40), late = tries > 300;       // „late“ = kompaktnější varianta, když je na trati málo místa
+      if (h === 0 && !late) {
+        if (!groundSolid(px - 6, px + 12) || !cellsFree(px - 1, 5, px + 8, 12)) continue;
+        brickRow(px, 10, 3); brickRow(px + 4, 7, 3); items.push(lifeItem(px + 5, 6)); break;
+      } else if (h === 0) {
+        if (!groundSolid(px - 1, px + 6) || !cellsFree(px - 1, 5, px + 6, 12)) continue;
+        pipeAt(px, 3); brickRow(px + 3, 7, 3); items.push(lifeItem(px + 4, 6)); break;
+      } else {
+        if (!groundSolid(px - (late ? 1 : 6), px + (late ? 3 : 8)) || !cellsFree(px - 1, 5, px + 4, 12)) continue;
+        brickRow(px, 8, 3); items.push(lifeItem(px + 1, 7)); break;
+      }
+    }
+  }
+
+  // 5) plošiny s bloky ?: nízké jen tam, kde nejsou poblíž díry (jinak by blokovaly skok)
+  const plats = [];
+  const nPlat = Math.round(LW / 12);
+  for (let k = 0; k < nPlat; k++) {
+    const len = ri(3, 5);
+    const px = ri(14, LW - 24 - len);
+    const low = rnd() < 0.6;
+    const row = low ? ri(9, 10) : 7;
+    if (low && !groundSolid(px - 6, px + len + 5)) continue;
+    if (!cellsFree(px - 1, row - 2, px + len, low ? 12 : row + 1)) continue;
+    for (let i = 0; i < len; i++) setT(px + i, row, rnd() < 0.28 - 0.12 * d ? '?' : 'B');
+    if (rnd() < 0.6) coinRowAt(px, row - 1, len);
+    plats.push({ x: px, row, len });
+  }
+
+  // 6) mince: oblouky nad děrami a řádky na zemi
+  pits.forEach(([a, b]) => { const w = b - a + 1; for (let k = 0; k < w; k++) coinAt(a + k, 11 - Math.round(Math.sin((k + 0.5) / w * Math.PI) * 2)); });
+  for (let k = 0; k < Math.round(LW / 25); k++) {
+    const cx = ri(14, LW - 24);
+    if (groundSolid(cx, cx + 2) && cellsFree(cx, 11, cx + 2, 12)) coinRowAt(cx, 12, 3);
+  }
+
+  // 7) checkpoint na bezpečném rovném místě
+  checkpoint = { x: -99999, reached: true, spawnX: 2 * T };
+  const okCp = c => groundSolid(c - 3, c + 2) && cellsFree(c - 1, 8, c + 2, 12);
+  let cx = Math.floor(LW * 0.55), found = false;
+  for (let c = cx; c < LW - 30 && !found; c++) if (okCp(c)) { cx = c; found = true; }
+  for (let c = Math.floor(LW * 0.55); c > 20 && !found; c--) if (okCp(c)) { cx = c; found = true; }
+  if (found) checkpoint = { x: cx * T, reached: false, spawnX: (cx - 2) * T };
+
+  // 8) nepřátelé: čím vyšší level, tím víc a rychlejší; Pankáč od levelu 3
+  const np = 6 + Math.round(d * 20), ns = n >= 3 ? 1 + Math.round(d * 7) : 0;
+  const placed = [];
+  const spotOK = tx => groundSolid(tx, tx + 1) && cellsFree(tx, 10, tx + 1, 12) && placed.every(p => Math.abs(p - tx) >= 3);
+  const place = (count, fn) => {
+    for (let i = 0, tries = 0; i < count && tries < 500; tries++) {
+      const tx = ri(12, LW - 18);
+      if (!spotOK(tx)) continue;
+      placed.push(tx); fn(tx); i++;
+    }
+  };
+  place(np, tx => pacAt(tx, 13, 1 + 0.6 * d, rnd() < 0.5 ? -1 : 1));
+  place(ns, tx => stickAt(tx, 13, 1 + 0.5 * d, rnd() < 0.5 ? -1 : 1));
+  plats.forEach(pl => { if (pl.len >= 4 && rnd() < 0.5 * d) pacAt(pl.x + 1, pl.row, 1 + 0.6 * d, rnd() < 0.5 ? -1 : 1); });
+}
+
+// Level 21: hradní aréna s velkým Mimoněm. Vlastnosti bosse (BOSS) doladíme později.
+const BOSS = { hp: 6, speed: 1.3, rage: 2.4, jump: 150, hurt: 70 };
+
+function buildBoss() {
+  LW = 30;
+  grid = Array.from({ length: LH }, () => Array(LW).fill(' '));
+  resetWorld();
+  groundCols(0, LW - 1);
+  for (let y = 0; y < 13; y++) { setT(0, y, '#'); setT(LW - 1, y, '#'); }
+  for (let x = 0; x < LW; x++) { setT(x, 0, '#'); setT(x, 1, '#'); }
+  brickRow(4, 8, 4); brickRow(22, 8, 4); brickRow(13, 6, 4, 'B');
+  coinRowAt(13, 5, 4);
+  enemies.push({ type: 'boss', x: 20 * T, y: 13 * T - 96, w: 64, h: 96, vx: 0, vy: 0, dir: -1, dead: false, timer: 0,
+                 anim: 0, hp: BOSS.hp, hurt: 0, jumpT: BOSS.jump, dying: false, spin: 0, dropped: false });
+  items.push(lifeItem(5, 6));
+  checkpoint = { x: -99999, reached: true, spawnX: 2 * T };
+}
+
+function buildLevel(n) {
+  LV = { n, name: THEMES[n - 1].name, theme: THEMES[n - 1], boss: n === LEVEL_COUNT };
+  if (n === 1) buildLevel1();
+  else if (n === LEVEL_COUNT) buildBoss();
+  else genLevel(n);
+}
+
+function startLevel(n) {
+  G.level = n; buildLevel(n);
+  P = newPlayer(2 * T);
+  G.cam = 0; G.state = 'play'; G.paused = false; G.banner = 170;
+}
 
 function newPlayer(x) {
   return { x, y: GROUND_ROW * T - 28, w: 24, h: 28, vx: 0, vy: 0, face: 1, ground: false,
@@ -173,10 +355,7 @@ function newPlayer(x) {
 }
 function newGame() {
   G.score = 0; G.coins = 0; G.lives = 3; G.time = 0; G.paused = false;
-  buildLevel();
-  P = newPlayer(2 * T);
-  G.cam = 0;
-  G.state = 'play';
+  startLevel(START_LEVEL);
 }
 
 // ============================================================
@@ -243,7 +422,7 @@ function spawnBonus(tx, ty, forced) {
     type = type || pool[0][0];
   }
   if (type === 'coin') {
-    G.coins++; G.score += 100;
+    addCoin(); G.score += 100;
     popup(tx * T + 8, ty * T - 6, '+100', '#ffe066'); sfx.coin();
     puff(tx * T + 16, ty * T, '#ffd93b', 5);
     return;
@@ -252,8 +431,18 @@ function spawnBonus(tx, ty, forced) {
   sfx.bump();
 }
 
+function giveLife() {
+  if (G.lives < 9) G.lives++;
+  popup(P.x - 12, P.y - 24, '+1 ŽIVOT', '#7dffb0'); sfx.power();
+}
+function addCoin() {
+  G.coins++;
+  if (G.coins % 50 === 0) giveLife();                  // každých 50 mincí = +1 život
+}
+
 function collectItem(it) {
   const p = P;
+  if (it.type === 'life') { giveLife(); puff(it.x + 12, it.y + 12, '#ff6b8a', 10); return; }
   if (it.type === 'chest') {
     G.score += 500; popup(it.x, it.y - 8, '+500', '#ffe066'); sfx.coin(); sfx.power();
     puff(it.x + 12, it.y + 12, '#ffd93b', 10);
@@ -292,7 +481,41 @@ function updateStick(e, p) {
     e.vx = e.dir * 3.6;
   } else {
     e.anim += 0.12;
-    e.vx = e.dir * 0.7;
+    e.vx = e.dir * 0.7 * (e.spd || 1);
+  }
+}
+
+function bossHit(e, dmg) {
+  if (e.hurt > 0 || e.dying) return;
+  e.hp -= dmg; e.hurt = BOSS.hurt;
+  G.score += 300; popup(e.x + 14, e.y - 10, 'AU!', '#ffe066'); sfx.kill(); puff(e.x + 32, e.y + 24, '#f7d02c', 12);
+  if (e.hp <= 0) { e.dying = true; e.timer = 100; e.vy = -6; popup(e.x - 10, e.y - 30, 'POTÁPĚN!', '#7dffb0'); }
+}
+
+function updateBoss(e, p) {
+  if (e.dying) {
+    e.timer--; e.spin += 0.22;
+    if (e.timer <= 0) { e.dead = true; G.score += G.lives * 500; G.state = 'win'; sfx.win(); }
+    return;
+  }
+  const rage = e.hp <= BOSS.hp / 2;
+  e.anim += rage ? 0.22 : 0.12;
+  if (e.hurt > 0) e.hurt--;
+  if (rage && !e.dropped) { e.dropped = true; items.push(lifeItem(14, 10)); popup(e.x, e.y - 30, 'ZBĚSILÝ!', '#ff8a8a'); }
+  const stunned = e.hurt > BOSS.hurt - 30;
+  if (rage) e.dir = (p.x + p.w / 2) > (e.x + e.w / 2) ? 1 : -1;               // zuřivý Mimoň pronásleduje dráčka
+  e.vx = stunned ? 0 : e.dir * (rage ? BOSS.rage : BOSS.speed);
+  e.jumpT--;
+  if (e.jumpT <= 0 && e.vy === 0 && !stunned) { e.vy = -11.5; e.jumpT = BOSS.jump + Math.floor(Math.random() * 60); }
+  e.vy = Math.min(e.vy + 0.5, 12);
+  const r = moveBody(e);
+  if (r.hitX && !rage) e.dir *= -1;
+
+  if (overlap(p, e) && e.hurt <= 0) {
+    const stomp = p.vy > 0 && (p.y + p.h - p.vy) <= e.y + 36;
+    if (stomp) { bossHit(e, 1); p.vy = -11; }
+    else if (p.wheels > 0) bossHit(e, 1);
+    else if (p.invuln <= 0) loseLife(false);
   }
 }
 
@@ -313,6 +536,7 @@ function loseLife(fell) {
 function updatePlay() {
   const p = P;
   G.time++;
+  if (G.banner > 0) G.banner--;
   const left = keys.ArrowLeft || keys.KeyA, right = keys.ArrowRight || keys.KeyD;
   const dir = (right ? 1 : 0) - (left ? 1 : 0);
   const jumpHeld = keys.ArrowUp || keys.KeyW || keys.Space;
@@ -393,6 +617,7 @@ function updatePlay() {
     f.life--;
     for (const e of enemies) {
       if (!e.dead && overlap(f, e)) {
+        if (e.type === 'boss') { bossHit(e, 1); f.life = 0; continue; }
         if (e.type === 'stick' && stickHit(e)) { f.life = 0; continue; }
         e.dead = true; e.timer = 40; e.shot = true; e.vy = -5; f.life = 0;
         G.score += 200; popup(e.x, e.y - 8, '+200', '#ff9f43'); sfx.kill(); puff(e.x + 14, e.y + 10, '#ff7a1a', 8);
@@ -410,9 +635,10 @@ function updatePlay() {
       if (e.shot) { e.vy += 0.5; e.y += e.vy; e.x += e.dir * 1.5; }
       continue;
     }
+    if (e.type === 'boss') { updateBoss(e, p); if (G.state !== 'play') return; continue; }
     if (e.x + e.w < camL || e.x > camR) continue;       // mimo dosah
     if (e.type === 'stick') updateStick(e, p);
-    else { e.anim += 0.14; e.vx = e.dir * 1.0; }
+    else { e.anim += 0.14; e.vx = e.dir * 1.0 * (e.spd || 1); }
     e.vy = Math.min(e.vy + 0.5, 10);
     const r = moveBody(e);
     if (r.hitX) e.dir *= -1;
@@ -457,7 +683,7 @@ function updatePlay() {
   // mince
   for (const c of coinsList) {
     if (!c.got && overlap(p, c)) {
-      c.got = true; G.coins++; G.score += 50; sfx.coin();
+      c.got = true; addCoin(); G.score += 50; sfx.coin();
       popup(c.x, c.y - 4, '+50', '#ffe066');
     }
   }
@@ -471,8 +697,8 @@ function updatePlay() {
   if (p.y > LH * T + 60) loseLife(true);
 
   // cíl
-  if (G.state === 'play' && p.x + p.w > flagX()) {
-    G.score += G.lives * 500; G.state = 'win'; sfx.win();
+  if (G.state === 'play' && !LV.boss && p.x + p.w > flagX()) {
+    G.clearBonus = 500 + G.level * 100; G.score += G.clearBonus; G.state = 'clear'; sfx.win();
   }
 
   // částice
@@ -490,38 +716,320 @@ function updatePlay() {
 // ============================================================
 //  Kreslení – prostředí
 // ============================================================
-function drawBackground() {
-  const g = ctx.createLinearGradient(0, 0, 0, VH);
-  g.addColorStop(0, '#5aa9e6'); g.addColorStop(1, '#bfe6ff');
-  ctx.fillStyle = g; ctx.fillRect(0, 0, VW, VH);
+// ============================================================
+//  Motivy prostředí (každý level má jiné)
+// ============================================================
+const THEMES = [
+  { name: 'Zelená louka', sky: ['#5aa9e6', '#bfe6ff'], body: { x: 680, y: 80, r: 38, c1: '#fff3b0', c2: '#fff9d6' },
+    far: [{ k: .2, c: '#7fc79a', h: 150, w: 260, s: 'hills' }, { k: .35, c: '#5fb37c', h: 110, w: 200, s: 'hills' }],
+    amb: { t: 'clouds', c: 'rgba(255,255,255,.9)' },
+    gnd: { fill: '#8a5a34', dot: '#6f4528', cap: 'grass', top: '#4caf50', hi: '#6fd16c' },
+    brk: { fill: '#c8693a', line: '#8f4624', hi: '#e08a58' }, pipe: { fill: '#2e9e4f', dark: '#1f7a3a', light: '#4fd070' }, pit: null },
+  { name: 'Rozpálená poušť', sky: ['#f4b860', '#fff0c8'], body: { x: 640, y: 90, r: 46, c1: '#ffb347', c2: '#ffd98a' },
+    far: [{ k: .15, c: '#e9b872', h: 90, w: 420, s: 'dunes' }, { k: .3, c: '#d9a35a', h: 70, w: 320, s: 'dunes' }],
+    amb: { t: 'dust', c: 'rgba(255,230,170,.5)' },
+    gnd: { fill: '#c99a5b', dot: '#b2823f', cap: 'flat', top: '#e8c87a', hi: '#f6dc9a' },
+    brk: { fill: '#d9a05b', line: '#a8743a', hi: '#efc080' }, pipe: { fill: '#6aa84f', dark: '#3f7a2f', light: '#93cf6f' }, pit: { c1: '#b88a3e', c2: '#7a5a22', wave: 2 } },
+  { name: 'Zimní kraj', sky: ['#9dbfe3', '#eef6ff'], body: { x: 660, y: 80, r: 30, c1: '#fffbe6', c2: '#ffffff' },
+    far: [{ k: .2, c: '#b9cde3', h: 170, w: 300, s: 'mountains', cap: '#fff' }, { k: .35, c: '#8fb0cf', h: 110, w: 90, s: 'pines' }],
+    amb: { t: 'snow', c: '#fff' },
+    gnd: { fill: '#9fb6cf', dot: '#8aa2bd', cap: 'snow', top: '#ffffff', hi: '#eaf4ff' },
+    brk: { fill: '#7fb4dc', line: '#4a86b3', hi: '#b5dcf5' }, pipe: { fill: '#3a7ca5', dark: '#245a7a', light: '#6bb0d8' }, pit: { c1: '#2c5d8a', c2: '#12304f', wave: 3 } },
+  { name: 'Noční les', sky: ['#080c28', '#27346a'], body: { x: 650, y: 85, r: 34, c1: '#e8ecff', c2: '#ffffff' },
+    far: [{ k: .2, c: '#16254a', h: 150, w: 100, s: 'pines' }, { k: .4, c: '#0e1a38', h: 120, w: 80, s: 'pines' }],
+    amb: { t: 'stars', c: '#fff' },
+    gnd: { fill: '#3a2a1f', dot: '#2a1d15', cap: 'grass', top: '#2d6a45', hi: '#3f8a5a' },
+    brk: { fill: '#6a557e', line: '#43355a', hi: '#8a74a0' }, pipe: { fill: '#2d6a6a', dark: '#1d4a4a', light: '#4a9a9a' }, pit: { c1: '#05060f', c2: '#000', wave: 0 } },
+  { name: 'Sopka', sky: ['#2a0808', '#c2410c'], body: { x: 640, y: 100, r: 40, c1: '#ff8a3d', c2: '#ffb870' },
+    far: [{ k: .15, c: '#4a1a14', h: 210, w: 360, s: 'mountains' }, { k: .3, c: '#2d0f0c', h: 140, w: 260, s: 'mountains' }],
+    amb: { t: 'embers', c: '#ff9a3a' },
+    gnd: { fill: '#3a2522', dot: '#241513', cap: 'flat', top: '#6b3a2a', hi: '#8a4e38' },
+    brk: { fill: '#7a2e1e', line: '#3d140c', hi: '#a8452c' }, pipe: { fill: '#666', dark: '#3a3a3a', light: '#8a8a8a' }, pit: { c1: '#ff5a1f', c2: '#a81800', wave: 4 } },
+  { name: 'Podmořský svět', sky: ['#0b4a7a', '#27a3c9'], body: null,
+    far: [{ k: .2, c: '#1b7a8c', h: 120, w: 240, s: 'hills' }, { k: .35, c: '#e56b6f', h: 90, w: 110, s: 'crystals' }],
+    amb: { t: 'bubbles', c: 'rgba(255,255,255,.55)' },
+    gnd: { fill: '#c9b27a', dot: '#b09960', cap: 'flat', top: '#e8d9a8', hi: '#f6ecc8' },
+    brk: { fill: '#e56b6f', line: '#a13d46', hi: '#f59a9c' }, pipe: { fill: '#2aa198', dark: '#17706a', light: '#5fd0c6' }, pit: { c1: '#0a2f55', c2: '#041325', wave: 3 } },
+  { name: 'Podzimní les', sky: ['#f2a65a', '#ffe3b8'], body: { x: 660, y: 90, r: 36, c1: '#fff0c8', c2: '#fff8e0' },
+    far: [{ k: .2, c: '#c2562a', h: 150, w: 130, s: 'trees' }, { k: .35, c: '#a8431f', h: 120, w: 110, s: 'trees' }],
+    amb: { t: 'leaves', c: '#d9792a' },
+    gnd: { fill: '#6b4423', dot: '#523318', cap: 'grass', top: '#c2792a', hi: '#e09a3f' },
+    brk: { fill: '#a0522d', line: '#6e3419', hi: '#c97a4a' }, pipe: { fill: '#8a6a2a', dark: '#5a441a', light: '#b8944a' }, pit: null },
+  { name: 'Krystalová jeskyně', sky: ['#120e20', '#2c2346'], body: null,
+    far: [{ k: .2, c: '#33295a', h: 130, w: 110, s: 'stal' }, { k: .3, c: '#4a3d85', h: 120, w: 130, s: 'crystals' }],
+    amb: { t: 'sparks', c: '#9ad1ff' },
+    gnd: { fill: '#4a4458', dot: '#38324a', cap: 'flat', top: '#6b6585', hi: '#8a84a8' },
+    brk: { fill: '#6a5f86', line: '#3f3858', hi: '#8f84b0' }, pipe: { fill: '#3a7a6a', dark: '#245046', light: '#5fb09a' }, pit: { c1: '#0a0715', c2: '#000', wave: 0 } },
+  { name: 'Nad mraky', sky: ['#5ab8ff', '#eaf8ff'], body: { x: 680, y: 80, r: 38, c1: '#fff3b0', c2: '#fffbe0' },
+    far: [{ k: .15, c: 'rgba(255,255,255,.7)', h: 120, w: 260, s: 'hills' }, { k: .3, c: 'rgba(255,255,255,.9)', h: 80, w: 200, s: 'hills' }],
+    amb: { t: 'clouds', c: 'rgba(255,255,255,.95)' },
+    gnd: { fill: '#e8f0fb', dot: '#cfdcf0', cap: 'snow', top: '#ffffff', hi: '#ffffff' },
+    brk: { fill: '#f5c16c', line: '#c08a2a', hi: '#ffe0a0' }, pipe: { fill: '#7ab8ee', dark: '#4a88c0', light: '#b0dcff' }, pit: null },
+  { name: 'Džungle', sky: ['#2c8a56', '#c4eba0'], body: { x: 640, y: 90, r: 34, c1: '#f4ffb0', c2: '#fbffd8' },
+    far: [{ k: .2, c: '#1e6b3c', h: 170, w: 120, s: 'trees' }, { k: .35, c: '#175a31', h: 130, w: 100, s: 'trees' }],
+    amb: { t: 'leaves', c: '#4cc46a' },
+    gnd: { fill: '#5b3b1e', dot: '#432b14', cap: 'grass', top: '#2e9e3f', hi: '#52c25f' },
+    brk: { fill: '#8b5a2b', line: '#5a3a1a', hi: '#b07a45' }, pipe: { fill: '#c9a24a', dark: '#8a6a22', light: '#e8c878' }, pit: { c1: '#1d4d2a', c2: '#0b2414', wave: 2 } },
+  { name: 'Cukrová země', sky: ['#ffbfe0', '#fff2fa'], body: { x: 670, y: 85, r: 34, c1: '#ffe27a', c2: '#fff2b0' },
+    far: [{ k: .2, c: '#ff9ecb', h: 140, w: 240, s: 'hills' }, { k: .35, c: '#ff7fb8', h: 100, w: 180, s: 'hills' }],
+    amb: { t: 'confetti', c: '#fff' },
+    gnd: { fill: '#8b4a2b', dot: '#6e3920', cap: 'drip', top: '#ffb3d9', hi: '#ffd6ec' },
+    brk: { fill: '#ffd6e8', line: '#ff8cc0', hi: '#ffffff' }, pipe: { fill: '#58d6b0', dark: '#2a9a7a', light: '#9af0d4' }, pit: { c1: '#d81b7a', c2: '#7a0a45', wave: 3 } },
+  { name: 'Bažina', sky: ['#4c5a2e', '#a9b878'], body: { x: 660, y: 90, r: 30, c1: '#e8f0a0', c2: '#f4f8c8' },
+    far: [{ k: .2, c: '#3b4a24', h: 160, w: 120, s: 'trees' }, { k: .35, c: '#2a3818', h: 120, w: 100, s: 'trees' }],
+    amb: { t: 'fog', c: 'rgba(200,220,150,.18)' },
+    gnd: { fill: '#4a3a22', dot: '#352a18', cap: 'grass', top: '#6b7a2e', hi: '#8a9a44' },
+    brk: { fill: '#6a5a3a', line: '#43381f', hi: '#8a7a55' }, pipe: { fill: '#5a7a2a', dark: '#3a5218', light: '#80a448' }, pit: { c1: '#8ee03a', c2: '#2f7a12', wave: 3 } },
+  { name: 'Pláž', sky: ['#42b8f5', '#e4f6ff'], body: { x: 650, y: 80, r: 42, c1: '#ffe066', c2: '#fff3a8' },
+    far: [{ k: .15, c: '#1e9fe0', h: 60, w: 300, s: 'dunes' }, { k: .3, c: '#f0d79a', h: 70, w: 260, s: 'dunes' }],
+    amb: { t: 'clouds', c: 'rgba(255,255,255,.92)' },
+    gnd: { fill: '#e8cd8a', dot: '#d4b570', cap: 'flat', top: '#fff0c4', hi: '#ffffff' },
+    brk: { fill: '#ff8a65', line: '#c0553a', hi: '#ffb39a' }, pipe: { fill: '#26a69a', dark: '#14706a', light: '#5fd4c8' }, pit: { c1: '#1288d0', c2: '#064a80', wave: 4 } },
+  { name: 'Noční město', sky: ['#0d0a24', '#4a2f6e'], body: { x: 640, y: 85, r: 32, c1: '#f1ecff', c2: '#ffffff' },
+    far: [{ k: .2, c: '#1b1840', h: 180, w: 90, s: 'city', win: '#ffd86b' }, { k: .35, c: '#120f2e', h: 130, w: 80, s: 'city', win: '#ff8ad4' }],
+    amb: { t: 'stars', c: '#fff' },
+    gnd: { fill: '#2a2a3a', dot: '#1e1e2c', cap: 'flat', top: '#46465e', hi: '#62628a' },
+    brk: { fill: '#a04060', line: '#6a2640', hi: '#d06a8a' }, pipe: { fill: '#3a8aa0', dark: '#245868', light: '#6ac0d8' }, pit: { c1: '#08061a', c2: '#000', wave: 0 } },
+  { name: 'Továrna', sky: ['#4a4a55', '#9a9aa6'], body: null,
+    far: [{ k: .2, c: '#5e5e6c', h: 170, w: 150, s: 'factory' }, { k: .35, c: '#47475a', h: 120, w: 120, s: 'factory' }],
+    amb: { t: 'dust', c: 'rgba(210,210,220,.4)' },
+    gnd: { fill: '#55555e', dot: '#3e3e46', cap: 'flat', top: '#7a7a88', hi: '#9a9aaa' },
+    brk: { fill: '#8a5a3a', line: '#573820', hi: '#b07a52' }, pipe: { fill: '#b08a2a', dark: '#7a5c14', light: '#d8b45a' }, pit: { c1: '#16161a', c2: '#000', wave: 3 } },
+  { name: 'Měsíc', sky: ['#000008', '#0c0c30'], body: { x: 650, y: 90, r: 40, c1: '#3a7bd5', c2: '#7fb6ff' },
+    far: [{ k: .15, c: '#3a3a4c', h: 150, w: 320, s: 'mountains' }, { k: .3, c: '#2a2a3a', h: 100, w: 220, s: 'mountains' }],
+    amb: { t: 'stars', c: '#fff' },
+    gnd: { fill: '#9a9aa8', dot: '#7a7a88', cap: 'flat', top: '#bcbccc', hi: '#d8d8e6' },
+    brk: { fill: '#5a6aa0', line: '#38447a', hi: '#8a9ad0' }, pipe: { fill: '#6a8aff', dark: '#3a56c0', light: '#a0b8ff' }, pit: { c1: '#000', c2: '#000', wave: 0 } },
+  { name: 'Strašidelný hřbitov', sky: ['#24163a', '#6e4a82'], body: { x: 640, y: 95, r: 44, c1: '#f4eecf', c2: '#fffbe6' },
+    far: [{ k: .2, c: '#2a1a40', h: 90, w: 110, s: 'graves' }, { k: .35, c: '#1c1030', h: 100, w: 140, s: 'pines' }],
+    amb: { t: 'fog', c: 'rgba(210,190,255,.16)' },
+    gnd: { fill: '#2e2a33', dot: '#1f1c24', cap: 'grass', top: '#4a5a3a', hi: '#66784e' },
+    brk: { fill: '#4a4a5a', line: '#2e2e3a', hi: '#6a6a80' }, pipe: { fill: '#5a3a6a', dark: '#38224a', light: '#8a64a0' }, pit: { c1: '#150a22', c2: '#000', wave: 0 } },
+  { name: 'Ledová jeskyně', sky: ['#082a4a', '#2c6e9e'], body: null,
+    far: [{ k: .2, c: '#3d8ec4', h: 120, w: 120, s: 'stal' }, { k: .3, c: '#7fd4ff', h: 130, w: 120, s: 'crystals' }],
+    amb: { t: 'snow', c: '#d8f1ff' },
+    gnd: { fill: '#6fa8d0', dot: '#5890b8', cap: 'snow', top: '#d8f1ff', hi: '#ffffff' },
+    brk: { fill: '#9fd8ff', line: '#4a90c0', hi: '#e0f4ff' }, pipe: { fill: '#2a6a9a', dark: '#184a70', light: '#5aa0d0' }, pit: { c1: '#071a3a', c2: '#010612', wave: 2 } },
+  { name: 'Ohnivá pevnost', sky: ['#1a0505', '#7a1f0a'], body: { x: 650, y: 100, r: 36, c1: '#ff6a2a', c2: '#ffa060' },
+    far: [{ k: .2, c: '#2a0f0f', h: 190, w: 160, s: 'castle', win: '#ff7a2a' }, { k: .35, c: '#1c0a0a', h: 140, w: 130, s: 'castle', win: '#ff5a1a' }],
+    amb: { t: 'embers', c: '#ff7a2a' },
+    gnd: { fill: '#3a1a1a', dot: '#260f0f', cap: 'flat', top: '#8a2a1a', hi: '#b24a30' },
+    brk: { fill: '#5a2a2a', line: '#2e1212', hi: '#804040' }, pipe: { fill: '#8a3a1a', dark: '#5a2008', light: '#c06a3a' }, pit: { c1: '#ff4a10', c2: '#8a0e00', wave: 4 } },
+  { name: 'Zlatý chrám', sky: ['#ffc65c', '#fff4cc'], body: { x: 650, y: 85, r: 40, c1: '#ffeb99', c2: '#fffbe0' },
+    far: [{ k: .2, c: '#d9a520', h: 170, w: 150, s: 'castle', win: '#7a4a00' }, { k: .35, c: '#b8860b', h: 130, w: 120, s: 'castle', win: '#5a3400' }],
+    amb: { t: 'sparks', c: '#fff2a0' },
+    gnd: { fill: '#a8782a', dot: '#8a6020', cap: 'flat', top: '#ffd24a', hi: '#fff0a0' },
+    brk: { fill: '#e0b030', line: '#a07010', hi: '#fff0a0' }, pipe: { fill: '#c0902a', dark: '#85600f', light: '#f0c860' }, pit: { c1: '#6a3a00', c2: '#2a1500', wave: 2 } },
+  { name: 'Hrad – Mimoň', sky: ['#100818', '#2e1238'], body: null,
+    far: [{ k: .25, c: '#221232', h: 230, w: 220, s: 'castle', win: '#ffb43a' }],
+    amb: { t: 'embers', c: '#ffa03a' },
+    gnd: { fill: '#4a4458', dot: '#38324a', cap: 'stone', top: '#6b6585', hi: '#8a84a8' },
+    brk: { fill: '#6b6478', line: '#3a3548', hi: '#8a8498' }, pipe: { fill: '#5a5568', dark: '#3a3548', light: '#7a7588' }, pit: null },
+];
 
-  // slunce
-  ctx.fillStyle = '#fff3b0'; ctx.beginPath(); ctx.arc(680, 80, 38, 0, 7); ctx.fill();
-  ctx.fillStyle = '#fff9d6'; ctx.beginPath(); ctx.arc(680, 80, 28, 0, 7); ctx.fill();
+const mod = (v, n) => ((v % n) + n) % n;
 
-  // mraky (paralaxa)
-  ctx.fillStyle = 'rgba(255,255,255,.9)';
-  for (let i = 0; i < 12; i++) {
-    const x = ((i * 330 - G.cam * 0.4) % (12 * 330) + 12 * 330) % (12 * 330) - 150;
-    const y = 40 + (i * 53) % 110;
-    ctx.beginPath();
-    ctx.arc(x, y, 20, 0, 7); ctx.arc(x + 24, y - 8, 26, 0, 7); ctx.arc(x + 52, y, 20, 0, 7);
-    ctx.fill();
+function drawAmbient(a) {
+  const t = G.time;
+  ctx.save();
+  if (a.t === 'clouds') {
+    ctx.fillStyle = a.c;
+    for (let i = 0; i < 12; i++) {
+      const x = mod(i * 330 - G.cam * 0.4, 12 * 330) - 150, y = 40 + (i * 53) % 110;
+      ctx.beginPath(); ctx.arc(x, y, 20, 0, 7); ctx.arc(x + 24, y - 8, 26, 0, 7); ctx.arc(x + 52, y, 20, 0, 7); ctx.fill();
+    }
+  } else if (a.t === 'stars') {
+    ctx.fillStyle = a.c;
+    for (let i = 0; i < 80; i++) {
+      const x = mod(i * 137 - G.cam * 0.05, VW), y = (i * 71) % 330, sz = 1 + (i % 3) * 0.7;
+      ctx.globalAlpha = 0.45 + 0.55 * Math.abs(Math.sin(t * 0.04 + i));
+      ctx.fillRect(x, y, sz, sz);
+    }
+  } else if (a.t === 'snow') {
+    ctx.fillStyle = a.c; ctx.globalAlpha = 0.85;
+    for (let i = 0; i < 80; i++) {
+      const x = mod(i * 113 + Math.sin(t * 0.02 + i) * 22 - G.cam * 0.25, VW), y = mod(i * 47 + t * (0.7 + (i % 4) * 0.3), VH);
+      ctx.beginPath(); ctx.arc(x, y, 1.4 + (i % 3) * 0.8, 0, 7); ctx.fill();
+    }
+  } else if (a.t === 'embers') {
+    ctx.fillStyle = a.c;
+    for (let i = 0; i < 40; i++) {
+      const x = mod(i * 89 + Math.sin(t * 0.03 + i) * 16 - G.cam * 0.3, VW), y = VH - mod(i * 61 + t * (0.6 + (i % 5) * 0.25), VH);
+      ctx.globalAlpha = 0.35 + 0.5 * Math.abs(Math.sin(t * 0.07 + i));
+      ctx.fillRect(x, y, 2.5, 2.5);
+    }
+  } else if (a.t === 'bubbles') {
+    ctx.strokeStyle = a.c; ctx.lineWidth = 1.4;
+    for (let i = 0; i < 30; i++) {
+      const x = mod(i * 97 + Math.sin(t * 0.03 + i) * 10 - G.cam * 0.3, VW), y = VH - mod(i * 53 + t * (0.5 + (i % 4) * 0.25), VH);
+      ctx.beginPath(); ctx.arc(x, y, 2 + (i % 4) * 1.6, 0, 7); ctx.stroke();
+    }
+  } else if (a.t === 'leaves') {
+    ctx.fillStyle = a.c;
+    for (let i = 0; i < 28; i++) {
+      const x = mod(i * 131 + Math.sin(t * 0.025 + i) * 30 - G.cam * 0.35, VW), y = mod(i * 59 + t * (0.7 + (i % 3) * 0.3), VH);
+      ctx.beginPath(); ctx.ellipse(x, y, 4, 2, t * 0.04 + i, 0, 7); ctx.fill();
+    }
+  } else if (a.t === 'dust') {
+    ctx.fillStyle = a.c;
+    for (let i = 0; i < 26; i++) {
+      const x = mod(i * 151 - t * (1.5 + (i % 3)) - G.cam * 0.5, VW), y = 140 + (i * 37) % 300;
+      ctx.fillRect(x, y, 14 + (i % 3) * 8, 1.6);
+    }
+  } else if (a.t === 'fog') {
+    ctx.fillStyle = a.c;
+    for (let i = 0; i < 7; i++) {
+      const x = mod(i * 190 + t * 0.25 - G.cam * 0.4, VW + 300) - 150, y = 290 + (i * 41) % 110;
+      ctx.beginPath(); ctx.ellipse(x, y, 150, 28, 0, 0, 7); ctx.fill();
+    }
+  } else if (a.t === 'sparks') {
+    ctx.fillStyle = a.c;
+    for (let i = 0; i < 45; i++) {
+      const x = mod(i * 127 - G.cam * 0.15, VW), y = (i * 67) % 400;
+      ctx.globalAlpha = Math.max(0, Math.sin(t * 0.05 + i * 1.7));
+      ctx.fillRect(x - 1, y - 3, 2, 6); ctx.fillRect(x - 3, y - 1, 6, 2);
+    }
+  } else if (a.t === 'confetti') {
+    const cols = ['#ff6b9d', '#ffd93b', '#6bd6ff', '#9bff6b', '#c79bff'];
+    for (let i = 0; i < 45; i++) {
+      const x = mod(i * 109 + Math.sin(t * 0.03 + i) * 18 - G.cam * 0.3, VW), y = mod(i * 43 + t * (0.6 + (i % 3) * 0.3), VH);
+      ctx.fillStyle = cols[i % 5]; ctx.fillRect(x, y, 4, 7);
+    }
   }
-  // kopce (paralaxa)
-  const layers = [[0.2, '#7fc79a', 150, 260], [0.35, '#5fb37c', 110, 200]];
-  for (const [k, col, hgt, w] of layers) {
-    ctx.fillStyle = col;
-    const off = -((G.cam * k) % w) - w;
-    for (let x = off; x < VW + w; x += w) {
-      ctx.beginPath();
-      ctx.ellipse(x + w / 2, GROUND_ROW * T + 2, w / 2, hgt, 0, Math.PI, 0);
-      ctx.fill();
+  ctx.restore();
+}
+
+function drawFarLayer(L) {
+  const w = L.w, par = G.cam * L.k, base = GROUND_ROW * T + 2;
+  const first = Math.floor(par / w) - 1, cnt = Math.ceil(VW / w) + 3;
+  for (let j = 0; j < cnt; j++) {
+    const idx = first + j, x = idx * w - par;
+    const h = L.h * (0.7 + 0.3 * (mod(idx, 7) / 6));
+    ctx.fillStyle = L.c;
+    switch (L.s) {
+      case 'hills':
+        ctx.beginPath(); ctx.ellipse(x + w / 2, base, w / 2, h, 0, Math.PI, 0); ctx.fill(); break;
+      case 'dunes':
+        ctx.beginPath(); ctx.moveTo(x - 2, base); ctx.quadraticCurveTo(x + w * 0.4, base - h * 1.9, x + w + 2, base); ctx.fill(); break;
+      case 'mountains':
+        ctx.beginPath(); ctx.moveTo(x - 10, base); ctx.lineTo(x + w * 0.45, base - h * 1.1); ctx.lineTo(x + w * 0.62, base - h * 0.75);
+        ctx.lineTo(x + w * 0.78, base - h * 0.95); ctx.lineTo(x + w + 10, base); ctx.fill();
+        if (L.cap) {
+          ctx.fillStyle = L.cap; ctx.beginPath(); ctx.moveTo(x + w * 0.45, base - h * 1.1); ctx.lineTo(x + w * 0.37, base - h * 0.84);
+          ctx.lineTo(x + w * 0.45, base - h * 0.9); ctx.lineTo(x + w * 0.53, base - h * 0.82); ctx.fill();
+        }
+        break;
+      case 'pines':
+        for (let k = 0; k < 3; k++) {
+          const by = base - k * h * 0.26, hw = w * 0.36 * (1 - k * 0.2);
+          ctx.beginPath(); ctx.moveTo(x + w / 2 - hw, by); ctx.lineTo(x + w / 2, by - h * 0.5); ctx.lineTo(x + w / 2 + hw, by); ctx.fill();
+        }
+        ctx.fillRect(x + w / 2 - 3, base - 6, 6, 8); break;
+      case 'trees':
+        ctx.fillRect(x + w / 2 - 4, base - h * 0.5, 8, h * 0.5);
+        ctx.beginPath(); ctx.arc(x + w / 2, base - h * 0.62, w * 0.36, 0, 7); ctx.arc(x + w * 0.3, base - h * 0.5, w * 0.25, 0, 7);
+        ctx.arc(x + w * 0.72, base - h * 0.5, w * 0.25, 0, 7); ctx.fill(); break;
+      case 'city': {
+        const bh = h * 1.2;
+        ctx.fillRect(x + 4, base - bh, w - 8, bh);
+        ctx.fillStyle = L.win || '#ffd86b';
+        for (let r = 0; r < Math.floor(bh / 18) - 1; r++) for (let c = 0; c < 3; c++)
+          if (mod(idx * 7 + r * 3 + c * 5, 3) === 0) ctx.fillRect(x + 12 + c * ((w - 32) / 3 + 3), base - bh + 12 + r * 18, 6, 8);
+        break; }
+      case 'crystals':
+        for (let k = 0; k < 3; k++) {
+          const cx = x + w * (0.2 + 0.3 * k), sh = h * (0.55 + 0.45 * mod(idx + k, 3) / 2);
+          ctx.beginPath(); ctx.moveTo(cx - w * 0.09, base); ctx.lineTo(cx, base - sh); ctx.lineTo(cx + w * 0.09, base); ctx.fill();
+        }
+        break;
+      case 'stal':
+        ctx.beginPath(); ctx.moveTo(x + w * 0.15, -2); ctx.lineTo(x + w * 0.35, h * 0.9); ctx.lineTo(x + w * 0.55, -2);
+        ctx.moveTo(x + w * 0.6, -2); ctx.lineTo(x + w * 0.75, h * 0.55); ctx.lineTo(x + w * 0.9, -2); ctx.fill(); break;
+      case 'castle': {
+        const th = h * 1.25, bx = x + w * 0.2, bw = w * 0.6;
+        ctx.fillRect(bx, base - th, bw, th);
+        for (let k = 0; k < 3; k++) ctx.fillRect(bx + k * (bw / 3) + 1, base - th - 10, bw / 3 - 4, 12);
+        ctx.fillStyle = L.win || '#000';
+        ctx.beginPath(); ctx.moveTo(x + w * 0.45, base - th * 0.5); ctx.lineTo(x + w * 0.45, base - th * 0.7);
+        ctx.arc(x + w * 0.5, base - th * 0.7, w * 0.05, Math.PI, 0); ctx.lineTo(x + w * 0.55, base - th * 0.5); ctx.fill();
+        break; }
+      case 'graves':
+        for (let k = 0; k < 3; k++) {
+          const gx = x + w * (0.15 + 0.3 * k), gh = h * (0.5 + 0.25 * (k % 2));
+          ctx.fillRect(gx, base - gh, w * 0.16, gh);
+          ctx.beginPath(); ctx.arc(gx + w * 0.08, base - gh, w * 0.08, Math.PI, 0); ctx.fill();
+          if (k === 1) { ctx.fillRect(gx + w * 0.08 - 2, base - gh - w * 0.22, 4, w * 0.22); ctx.fillRect(gx + w * 0.08 - 7, base - gh - w * 0.15, 14, 4); }
+        }
+        break;
+      case 'factory': {
+        ctx.fillRect(x + 6, base - h, w - 30, h); ctx.fillRect(x + w - 22, base - h * 1.6, 12, h * 1.6);
+        ctx.fillStyle = 'rgba(180,180,190,.35)';
+        const sm = Math.sin(G.time * 0.02 + idx);
+        ctx.beginPath(); ctx.arc(x + w - 16 + sm * 6, base - h * 1.6 - 14, 12, 0, 7); ctx.arc(x + w - 8 + sm * 10, base - h * 1.6 - 34, 16, 0, 7); ctx.fill();
+        break; }
     }
   }
 }
 
+function drawPit() {
+  const p = LV.theme.pit;
+  if (!p) return;
+  const y0 = GROUND_ROW * T + 14;
+  const gr = ctx.createLinearGradient(0, y0, 0, VH);
+  gr.addColorStop(0, p.c1); gr.addColorStop(1, p.c2);
+  ctx.fillStyle = gr;
+  ctx.beginPath(); ctx.moveTo(0, VH);
+  for (let x = 0; x <= VW; x += 8) ctx.lineTo(x, y0 + Math.sin((x + G.cam) * 0.06 + G.time * 0.08) * p.wave);
+  ctx.lineTo(VW, VH); ctx.closePath(); ctx.fill();
+}
+
+function drawCastleDeco() {
+  const t = G.time;
+  for (const tx of [7, 15, 23]) {                                   // gotická okna s měsícem
+    const x = tx * T + 16 - G.cam;
+    ctx.fillStyle = '#07040e';
+    ctx.beginPath(); ctx.moveTo(x - 20, 6 * T); ctx.lineTo(x - 20, 3 * T); ctx.arc(x, 3 * T, 20, Math.PI, 0); ctx.lineTo(x + 20, 6 * T); ctx.fill();
+    ctx.fillStyle = 'rgba(110,140,255,.28)';
+    ctx.beginPath(); ctx.moveTo(x - 14, 6 * T); ctx.lineTo(x - 14, 3 * T); ctx.arc(x, 3 * T, 14, Math.PI, 0); ctx.lineTo(x + 14, 6 * T); ctx.fill();
+    ctx.fillStyle = '#e8ecff'; ctx.beginPath(); ctx.arc(x + 4, 3 * T - 6, 6, 0, 7); ctx.fill();
+  }
+  for (const tx of [11, 19]) {                                       // červené prapory
+    const x = tx * T + 16 - G.cam;
+    ctx.fillStyle = '#8a1a2a'; ctx.fillRect(x - 14, 2 * T, 28, 78);
+    ctx.beginPath(); ctx.moveTo(x - 14, 2 * T + 78); ctx.lineTo(x, 2 * T + 62); ctx.lineTo(x + 14, 2 * T + 78); ctx.fill();
+    ctx.fillStyle = '#ffd24a'; ctx.beginPath(); ctx.arc(x, 2 * T + 26, 7, 0, 7); ctx.fill();
+  }
+  for (const tx of [3, 11, 19, 27]) {                                // pochodně
+    const x = tx * T + 16 - G.cam, y = 8 * T, f = Math.sin(t * 0.3 + tx) * 2;
+    const gl = ctx.createRadialGradient(x, y - 6, 4, x, y - 6, 70);
+    gl.addColorStop(0, 'rgba(255,160,60,.35)'); gl.addColorStop(1, 'rgba(255,160,60,0)');
+    ctx.fillStyle = gl; ctx.beginPath(); ctx.arc(x, y - 6, 70, 0, 7); ctx.fill();
+    ctx.fillStyle = '#3a3a3a'; ctx.fillRect(x - 3, y, 6, 20);
+    ctx.fillStyle = '#ff5a1f'; ctx.beginPath(); ctx.moveTo(x - 7, y); ctx.quadraticCurveTo(x - 9, y - 12, x + f, y - 24); ctx.quadraticCurveTo(x + 9, y - 12, x + 7, y); ctx.fill();
+    ctx.fillStyle = '#ffd93b'; ctx.beginPath(); ctx.moveTo(x - 4, y); ctx.quadraticCurveTo(x - 4, y - 8, x + f * 0.6, y - 15); ctx.quadraticCurveTo(x + 4, y - 8, x + 4, y); ctx.fill();
+  }
+}
+
+function drawBackground() {
+  const th = LV.theme;
+  const g = ctx.createLinearGradient(0, 0, 0, VH);
+  g.addColorStop(0, th.sky[0]); g.addColorStop(1, th.sky[1]);
+  ctx.fillStyle = g; ctx.fillRect(0, 0, VW, VH);
+  if (th.body) {
+    const b = th.body;
+    ctx.fillStyle = b.c1; ctx.beginPath(); ctx.arc(b.x, b.y, b.r, 0, 7); ctx.fill();
+    ctx.fillStyle = b.c2; ctx.beginPath(); ctx.arc(b.x, b.y, b.r * 0.74, 0, 7); ctx.fill();
+  }
+  const behind = th.amb.t === 'clouds' || th.amb.t === 'stars';
+  if (behind) drawAmbient(th.amb);
+  for (const L of th.far) drawFarLayer(L);
+  if (!behind) drawAmbient(th.amb);
+  if (LV.boss) drawCastleDeco();
+  drawPit();
+}
+
 function drawTiles() {
+  const th = LV.theme, gd = th.gnd, bk = th.brk, pp = th.pipe;
   const x0 = Math.floor(G.cam / T), x1 = x0 + Math.ceil(VW / T) + 1;
   for (let ty = 0; ty < LH; ty++) {
     for (let tx = x0; tx <= x1; tx++) {
@@ -534,21 +1042,28 @@ function drawTiles() {
       if (b) py -= Math.sin((b / 10) * Math.PI) * 7;
 
       if (t === '#') {
-        ctx.fillStyle = '#8a5a34'; ctx.fillRect(px, py, T, T);
-        ctx.fillStyle = '#6f4528';
+        ctx.fillStyle = gd.fill; ctx.fillRect(px, py, T, T);
+        ctx.fillStyle = gd.dot;
         ctx.fillRect(px + 6, py + 12, 4, 4); ctx.fillRect(px + 20, py + 22, 5, 4); ctx.fillRect(px + 14, py + 6, 3, 3);
-        if (!solidAt(tx, ty - 1) || grid[ty - 1]?.[tx] === ' ') {
-          ctx.fillStyle = '#4caf50'; ctx.fillRect(px, py, T, 9);
-          ctx.fillStyle = '#6fd16c'; ctx.fillRect(px, py, T, 3);
-          ctx.fillStyle = '#4caf50';
-          for (let i = 0; i < 4; i++) ctx.fillRect(px + i * 8 + 2, py + 9, 4, 4);
+        const open = ty === 0 || grid[ty - 1][tx] === ' ';
+        if (gd.cap === 'stone') {
+          ctx.fillStyle = gd.hi; ctx.fillRect(px, py, T, 2); ctx.fillRect(px, py + 15, T, 1);
+          ctx.fillStyle = gd.top; ctx.fillRect(px + (ty % 2 ? 8 : 20), py, 1, 15); ctx.fillRect(px + (ty % 2 ? 22 : 10), py + 16, 1, 16);
+        } else if (open) {
+          ctx.fillStyle = gd.top; ctx.fillRect(px, py, T, gd.cap === 'flat' ? 7 : 9);
+          ctx.fillStyle = gd.hi; ctx.fillRect(px, py, T, 3);
+          if (gd.cap === 'grass') { ctx.fillStyle = gd.top; for (let i = 0; i < 4; i++) ctx.fillRect(px + i * 8 + 2, py + 9, 4, 4); }
+          else if (gd.cap === 'snow' || gd.cap === 'drip') {
+            ctx.fillStyle = gd.top;
+            for (let i = 0; i < 4; i++) { ctx.beginPath(); ctx.arc(px + i * 8 + 4, py + 8, 4, 0, Math.PI); ctx.fill(); }
+          }
         }
       } else if (t === 'B') {
-        ctx.fillStyle = '#c8693a'; ctx.fillRect(px, py, T, T);
-        ctx.fillStyle = '#8f4624';
+        ctx.fillStyle = bk.fill; ctx.fillRect(px, py, T, T);
+        ctx.fillStyle = bk.line;
         ctx.fillRect(px, py + 15, T, 2); ctx.fillRect(px, py, T, 2); ctx.fillRect(px, py + T - 2, T, 2);
         ctx.fillRect(px + 15, py, 2, 16); ctx.fillRect(px + 7, py + 16, 2, 16); ctx.fillRect(px + 23, py + 16, 2, 16);
-        ctx.fillStyle = '#e08a58'; ctx.fillRect(px + 2, py + 2, 12, 2);
+        ctx.fillStyle = bk.hi; ctx.fillRect(px + 2, py + 2, 12, 2);
       } else if (t === '?') {
         ctx.fillStyle = '#e8a90c'; ctx.fillRect(px, py, T, T);
         ctx.fillStyle = '#ffd93b'; ctx.fillRect(px + 2, py + 2, T - 4, T - 4);
@@ -563,13 +1078,13 @@ function drawTiles() {
       } else if (t === 'T') {
         const cap = grid[ty - 1]?.[tx] !== 'T';
         const leftEdge = grid[ty][tx - 1] !== 'T';
-        ctx.fillStyle = '#2e9e4f'; ctx.fillRect(px, py, T, T);
-        ctx.fillStyle = '#4fd070'; ctx.fillRect(px + (leftEdge ? 5 : 0), py, 5, T);
-        ctx.fillStyle = '#1f7a3a'; ctx.fillRect(px + (leftEdge ? 0 : T - 4), py, 4, T);
+        ctx.fillStyle = pp.fill; ctx.fillRect(px, py, T, T);
+        ctx.fillStyle = pp.light; ctx.fillRect(px + (leftEdge ? 5 : 0), py, 5, T);
+        ctx.fillStyle = pp.dark; ctx.fillRect(px + (leftEdge ? 0 : T - 4), py, 4, T);
         if (cap) {
-          ctx.fillStyle = '#1f7a3a'; ctx.fillRect(px - (leftEdge ? 2 : 0), py, T + (leftEdge ? 0 : 2), 12);
-          ctx.fillStyle = '#2e9e4f'; ctx.fillRect(px + 1 - (leftEdge ? 1 : 0), py + 2, T - 2 + (leftEdge ? 0 : 1), 8);
-          ctx.fillStyle = '#4fd070'; ctx.fillRect(px + (leftEdge ? 4 : 0), py + 2, 5, 8);
+          ctx.fillStyle = pp.dark; ctx.fillRect(px - (leftEdge ? 2 : 0), py, T + (leftEdge ? 0 : 2), 12);
+          ctx.fillStyle = pp.fill; ctx.fillRect(px + 1 - (leftEdge ? 1 : 0), py + 2, T - 2 + (leftEdge ? 0 : 1), 8);
+          ctx.fillStyle = pp.light; ctx.fillRect(px + (leftEdge ? 4 : 0), py + 2, 5, 8);
         }
       }
     }
@@ -587,7 +1102,12 @@ function drawItems() {
       ctx.beginPath(); ctx.arc(sx + 12, sy + 12, 19, 0, 7); ctx.fill();
     }
     ctx.save(); ctx.translate(sx, sy);
-    if (it.type === 'chest') {
+    if (it.type === 'life') {
+      ctx.fillStyle = '#ff3b5c';
+      ctx.beginPath(); ctx.moveTo(12, 22); ctx.bezierCurveTo(-6, 9, 3, -3, 12, 6); ctx.bezierCurveTo(21, -3, 30, 9, 12, 22); ctx.fill();
+      ctx.fillStyle = 'rgba(255,255,255,.7)'; ctx.beginPath(); ctx.ellipse(7, 7, 2.6, 1.6, -0.6, 0, 7); ctx.fill();
+      ctx.fillStyle = '#7dffb0'; ctx.font = 'bold 9px system-ui'; ctx.textAlign = 'center'; ctx.fillText('1UP', 12, -3);
+    } else if (it.type === 'chest') {
       ctx.fillStyle = '#7a4a22'; ctx.fillRect(1, 10, 22, 13);
       ctx.fillStyle = '#a8692f'; ctx.fillRect(2, 11, 20, 11);
       ctx.fillStyle = '#b97a3d';
@@ -640,6 +1160,7 @@ function drawCoins() {
 }
 
 function drawFlags() {
+  if (LV.boss) return;
   // checkpoint
   const cx = checkpoint.x - G.cam;
   ctx.fillStyle = '#777'; ctx.fillRect(cx, 9 * T + 8, 4, 4 * T - 8 - 0);
@@ -863,7 +1384,68 @@ function drawStick(e) {
   ctx.restore();
 }
 
+function drawBoss(e) {
+  const x = Math.round(e.x - G.cam), y = Math.round(e.y);
+  if (x < -120 || x > VW + 120) return;
+  const rage = e.hp <= BOSS.hp / 2;
+  ctx.save();
+  ctx.translate(x + e.w / 2, y + e.h / 2);
+  if (e.dying) { ctx.rotate(e.spin); const sc = Math.max(0.15, e.timer / 100); ctx.scale(sc, sc); ctx.globalAlpha = Math.min(1, e.timer / 40); }
+  else if (e.hurt > 0 && Math.floor(e.hurt / 4) % 2 === 0) ctx.globalAlpha = 0.45;
+  ctx.scale(e.dir, 1);
+  ctx.translate(-e.w / 2, -e.h / 2);
+  if (rage && !e.dying) { ctx.shadowColor = '#ff3030'; ctx.shadowBlur = 16; }
+  const sw = Math.sin(e.anim * 2) * 4;
+
+  // boty a nohy
+  ctx.fillStyle = '#2f5aa8'; ctx.fillRect(14, 78, 14, 14); ctx.fillRect(36, 78, 14, 14);
+  ctx.fillStyle = '#1b1b1b'; ctx.beginPath(); ctx.ellipse(21 + sw, 93, 13, 5, 0, 0, 7); ctx.ellipse(43 - sw, 93, 13, 5, 0, 0, 7); ctx.fill();
+
+  // ruce (za tělem)
+  ctx.strokeStyle = '#f7d02c'; ctx.lineWidth = 9; ctx.lineCap = 'round';
+  ctx.beginPath(); ctx.moveTo(6, 52); ctx.lineTo(-6, 66 + sw); ctx.moveTo(58, 52); ctx.lineTo(70, 66 - sw); ctx.stroke();
+  ctx.fillStyle = '#1b1b1b'; ctx.beginPath(); ctx.arc(-6, 67 + sw, 6, 0, 7); ctx.arc(70, 67 - sw, 6, 0, 7); ctx.fill();
+
+  // tělo (žlutá kapsle) + montérky
+  ctx.shadowBlur = 0;
+  const body = () => { ctx.beginPath(); ctx.moveTo(4, 30); ctx.arc(32, 30, 28, Math.PI, 0); ctx.lineTo(60, 70); ctx.quadraticCurveTo(60, 84, 46, 84); ctx.lineTo(18, 84); ctx.quadraticCurveTo(4, 84, 4, 70); ctx.closePath(); };
+  ctx.fillStyle = '#f7d02c'; body(); ctx.fill();
+  ctx.save(); body(); ctx.clip();
+  ctx.fillStyle = '#2f5aa8'; ctx.fillRect(0, 56, 64, 32);
+  ctx.fillRect(12, 36, 8, 22); ctx.fillRect(44, 36, 8, 22);
+  ctx.fillStyle = '#244a8c'; ctx.fillRect(22, 64, 20, 13);
+  ctx.fillStyle = '#f7d02c'; ctx.beginPath(); ctx.arc(16, 56, 2.6, 0, 7); ctx.arc(48, 56, 2.6, 0, 7); ctx.fill();
+  ctx.fillStyle = '#2a2a2a'; ctx.fillRect(0, 22, 64, 7);                                    // pásek brýlí
+  ctx.restore();
+
+  // brýle a oči
+  for (const gx of [20, 44]) {
+    ctx.fillStyle = '#c9ced6'; ctx.beginPath(); ctx.arc(gx, 26, 11.5, 0, 7); ctx.fill();
+    ctx.strokeStyle = '#666'; ctx.lineWidth = 2; ctx.stroke();
+    ctx.fillStyle = '#fff'; ctx.beginPath(); ctx.arc(gx, 26, 8.5, 0, 7); ctx.fill();
+    ctx.fillStyle = rage ? '#7a1010' : '#5a3a1a'; ctx.beginPath(); ctx.arc(gx + 2, 26, rage ? 3.2 : 4.4, 0, 7); ctx.fill();
+    ctx.fillStyle = '#000'; ctx.beginPath(); ctx.arc(gx + 2.4, 26, 2, 0, 7); ctx.fill();
+  }
+  if (rage) {                                                                                // zamračené obočí
+    ctx.strokeStyle = '#2a1a00'; ctx.lineWidth = 3;
+    ctx.beginPath(); ctx.moveTo(8, 12); ctx.lineTo(28, 19); ctx.moveTo(56, 12); ctx.lineTo(36, 19); ctx.stroke();
+  }
+  // vlasy
+  ctx.strokeStyle = '#222'; ctx.lineWidth = 2; ctx.beginPath();
+  for (let i = -2; i <= 2; i++) { ctx.moveTo(32 + i * 4, 3); ctx.quadraticCurveTo(32 + i * 7, -8, 32 + i * 9, -6 + Math.abs(i) * 2); }
+  ctx.stroke();
+  // pusa
+  if (rage || e.hurt > 0) {
+    ctx.fillStyle = '#3a0a0a'; ctx.beginPath(); ctx.ellipse(32, 47, 11, 8, 0, 0, 7); ctx.fill();
+    ctx.fillStyle = '#fff'; ctx.fillRect(24, 40, 16, 4);
+  } else {
+    ctx.strokeStyle = '#3a2a00'; ctx.lineWidth = 2.5; ctx.beginPath(); ctx.arc(32, 42, 10, 0.15 * Math.PI, 0.85 * Math.PI); ctx.stroke();
+  }
+  ctx.restore();
+}
+
 function drawEnemy(e) {
+  if (e.type === 'boss') return drawBoss(e);
   if (e.type === 'stick') return drawStick(e);
   const x = Math.round(e.x - G.cam), y = Math.round(e.y);
   if (x < -40 || x > VW + 40) return;
@@ -926,7 +1508,14 @@ function text(str, x, y, size, color = '#fff', align = 'left', stroke = true) {
 }
 
 function drawHUD() {
-  for (let i = 0; i < 3; i++) text(i < G.lives ? '♥' : '♡', 16 + i * 26, 32, 26, i < G.lives ? '#ff4d6d' : '#ffffff99');
+  text('♥', 16, 34, 28, '#ff4d6d'); text('× ' + G.lives, 48, 33, 22);
+  text('LEVEL ' + G.level + '/' + LEVEL_COUNT + ' · ' + LV.name, VW / 2, 24, 15, 'rgba(255,255,255,.92)', 'center');
+  const boss = LV.boss && enemies.find(e => e.type === 'boss');
+  if (boss) {
+    ctx.fillStyle = 'rgba(0,0,0,.55)'; ctx.fillRect(VW / 2 - 152, 36, 304, 20);
+    ctx.fillStyle = boss.hp <= BOSS.hp / 2 ? '#ff4a3a' : '#f7d02c'; ctx.fillRect(VW / 2 - 150, 38, 300 * Math.max(0, boss.hp) / BOSS.hp, 16);
+    text('MIMOŇ', VW / 2, 52, 13, '#fff', 'center');
+  }
   ctx.fillStyle = '#ffd93b'; ctx.beginPath(); ctx.arc(26, 58, 8, 0, 7); ctx.fill();
   ctx.fillStyle = '#c99700'; ctx.fillRect(24, 52, 3, 12);
   text('× ' + G.coins, 42, 65, 18);
@@ -957,7 +1546,7 @@ function drawTitle() {
   text('plošinovka', VW / 2, 158, 26, '#fff', 'center');
   drawDragon(VW / 2, 400, 1, G.time * 0.1, false, 0, (G.time % 120) < 10 ? 10 - (G.time % 120) : 0, 3.2, (G.time % 150) > 140);
   if (Math.floor(G.time / 30) % 2 === 0) text('Stiskni ENTER nebo MEZERNÍK', VW / 2, 440, 24, '#fff', 'center');
-  text('Sesbírej mince, přeskoč díry, zastav Pac-Many – a doleť do cíle!', VW / 2, 200, 17, '#fff', 'center');
+  text('Projdi 21 levelů, sbírej mince i životy a poraž Mimoně na hradě!', VW / 2, 200, 17, '#fff', 'center');
   text('Bonusy v blocích ?: oheň · létání · traktorová kola · truhlička', VW / 2, 228, 16, '#ffe066', 'center');
   text('Pozor na Pankáče: po prvním zásahu utíká, zničíš ho až druhým!', VW / 2, 254, 15, '#ffb27a', 'center');
 }
@@ -965,13 +1554,25 @@ function drawTitle() {
 function drawEnd(win) {
   overlay(0.6);
   if (win) {
-    text('VYHRÁL JSI! 🐉🔥', VW / 2, 190, 56, '#ffd93b', 'center');
-    text('Skóre: ' + G.score + '   (bonus za životy: ' + (G.lives * 500) + ')', VW / 2, 245, 24, '#fff', 'center');
+    text('VYHRÁL JSI! 🐉🔥', VW / 2, 170, 56, '#ffd93b', 'center');
+    text('Mimoň je poražen a všech ' + LEVEL_COUNT + ' levelů zdolaných!', VW / 2, 218, 22, '#fff', 'center');
+    text('Skóre: ' + G.score + '   (bonus za životy: ' + (G.lives * 500) + ')', VW / 2, 262, 24, '#fff', 'center');
   } else {
-    text('KONEC HRY', VW / 2, 190, 60, '#ff6b6b', 'center');
-    text('Skóre: ' + G.score, VW / 2, 245, 26, '#fff', 'center');
+    text('KONEC HRY', VW / 2, 180, 60, '#ff6b6b', 'center');
+    text('Došel jsi do levelu ' + G.level + ' · skóre: ' + G.score, VW / 2, 232, 24, '#fff', 'center');
+    text('Hra se neukládá, začneš znovu od prvního levelu.', VW / 2, 266, 16, '#ffd9d9', 'center');
   }
-  if (Math.floor(G.time / 30) % 2 === 0 || true) text('ENTER – hrát znovu', VW / 2, 310, 22, '#fff', 'center');
+  if (G.t2 > 45) text('ENTER – hrát znovu', VW / 2, 318, 22, '#fff', 'center');
+}
+
+function drawClear() {
+  overlay(0.55);
+  text('LEVEL ' + G.level + ' SPLNĚN!', VW / 2, 170, 54, '#ffd93b', 'center');
+  text('Bonus +' + G.clearBonus + ' · skóre ' + G.score + ' · životy ' + G.lives, VW / 2, 218, 22, '#fff', 'center');
+  const next = THEMES[G.level];
+  const nm = G.level + 1 === LEVEL_COUNT ? 'BOSS – ' + next.name : next.name;
+  text('Další: level ' + (G.level + 1) + ' – ' + nm, VW / 2, 262, 20, '#bfe6ff', 'center');
+  if (G.t2 > 45) text('ENTER – pokračovat', VW / 2, 312, 22, '#fff', 'center');
 }
 
 function drawPlay() {
@@ -988,6 +1589,12 @@ function drawPlay() {
     { flying: p.wings > 0, spin: p.spin, wheels: p.wheels > 0, wheelRot: p.wrot });
   drawParticles();
   drawHUD();
+  if (G.banner > 0) {
+    ctx.globalAlpha = Math.min(1, G.banner / 40);
+    text('LEVEL ' + G.level, VW / 2, 190, 54, '#ffd93b', 'center');
+    text(LV.name, VW / 2, 232, 28, '#fff', 'center');
+    ctx.globalAlpha = 1;
+  }
   if (G.paused) { overlay(0.5); text('PAUZA', VW / 2, VH / 2, 56, '#fff', 'center'); text('P – pokračovat', VW / 2, VH / 2 + 40, 20, '#fff', 'center'); }
 }
 
@@ -998,14 +1605,17 @@ let last = performance.now(), acc = 0;
 const STEP = 1000 / 60;
 
 function tick() {
+  if (G.stT !== G.state) { G.stT = G.state; G.t2 = 0; }
   if (G.state === 'title') {
     G.time++;
     if (pressedEnter) newGame();
   } else if (G.state === 'play') {
     if (!G.paused) updatePlay();
   } else {
-    G.time++;
-    if (pressedEnter) newGame();
+    G.time++; G.t2++;                                      // krátká prodleva, ať Enter/skok hned nepřeskočí obrazovku
+    if (pressedEnter && G.t2 > 45) {
+      if (G.state === 'clear') startLevel(G.level + 1); else newGame();
+    }
   }
   pressedEnter = false;
 }
@@ -1016,12 +1626,13 @@ function frame(now) {
 
   ctx.clearRect(0, 0, VW, VH);
   if (G.state === 'title') drawTitle();
-  else { drawPlay(); if (G.state === 'win') drawEnd(true); else if (G.state === 'over') drawEnd(false); }
+  else { drawPlay(); if (G.state === 'win') drawEnd(true); else if (G.state === 'over') drawEnd(false); else if (G.state === 'clear') drawClear(); }
   text('v' + VERSION, 10, VH - 10, 14, 'rgba(255,255,255,.85)');      // verze v levém dolním rohu
   requestAnimationFrame(frame);
 }
 
-buildLevel();
+G.level = 1; G.banner = 0; G.t2 = 0;
+buildLevel(1);
 P = newPlayer(2 * T);
 requestAnimationFrame(frame);
 

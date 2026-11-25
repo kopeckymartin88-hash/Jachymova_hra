@@ -12,3 +12,11 @@ https://kopeckymartin88-hash.github.io/Jachymova_hra/
 ## Poznámky
 - Vývojová větev: `claude/gracious-cannon-qnfziu`.
 - Ovládání: šipky/WASD, skok ↑/W/Mezerník (2× = dvojskok), oheň Shift/F/X (jen s bonusem), P pauza, M zvuk.
+
+## Levely (21 celkem)
+- **Level 1** je ručně postavený (`buildLevel1`), **levely 2–20** generuje `genLevel(n)` z pevného semínka podle obtížnosti
+  (délka 150–240 dlaždic, víc děr, rour, nepřátel i rychlejších směrem k levelu 20; Pankáč od levelu 3).
+- **Level 21** je hradní aréna s bossem Mimoněm (`buildBoss`, vlastnosti bosse v konstantě `BOSS` – zatím zástupné hodnoty).
+- Každý level má vlastní motiv prostředí v poli `THEMES` (barvy, pozadí, počasí, vzhled dlaždic i děr).
+- Hra se neukládá. Po konci hry začíná hráč znovu od levelu 1. Životy se dají získat srdíčky 1UP a každými 50 mincemi (max. 9).
+- Pro zkoušení lze hru spustit od libovolného levelu: `index.html?level=12`.
