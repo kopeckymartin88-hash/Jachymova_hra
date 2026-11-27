@@ -5,6 +5,11 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="theme-color" content="#14121f">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icon-192.png">
+<link rel="apple-touch-icon" href="apple-touch-icon.png">
 <title>Dráček – plošinovka</title>
 <style>
   html, body { margin: 0; height: 100%; background: #14121f; color: #e8e6f0;
@@ -41,6 +46,10 @@
   body.canfire .tb.fire { opacity: 1; }
   #tdown { display: none; }
   body.flying #tdown { display: block; }
+  /* celá obrazovka (klávesa C / tlačítko ⛶) */
+  body.fs { gap: 0; }
+  body.fs canvas { width: min(100vw, calc(100vh * 800 / 480)); border-radius: 0; box-shadow: none; }
+  body.fs p { display: none; }
   /* telefon na výšku: výzva k otočení (na tabletu se dá hrát i na výšku) */
   #rotate { display: none; position: fixed; inset: 0; z-index: 20; background: #14121f; color: #fff; align-items: center;
             justify-content: center; text-align: center; font-size: 22px; line-height: 1.5; padding: 24px; }
@@ -56,7 +65,7 @@
   <div class="grp" id="tact"><button class="tb" id="tdown" data-k="ArrowDown" aria-label="dolů">▼</button><button class="tb fire" data-k="KeyF" aria-label="oheň">🔥</button><button class="tb jump" data-k="Space" aria-label="skok">▲</button></div>
 </div>
 <p><kbd>←</kbd><kbd>→</kbd> / <kbd>A</kbd><kbd>D</kbd> chůze · <kbd>↑</kbd> / <kbd>W</kbd> / <kbd>Mezerník</kbd> skok (2× = dvojskok) ·
-   <kbd>Shift</kbd> / <kbd>F</kbd> oheň · <kbd>↑</kbd>/<kbd>↓</kbd> při létání · <kbd>B</kbd> obchod · <kbd>P</kbd>/<kbd>Esc</kbd> pauza · <kbd>M</kbd> zvuky · <kbd>H</kbd> hudba · 🎮 gamepad</p>
+   <kbd>Shift</kbd> / <kbd>F</kbd> oheň · <kbd>↑</kbd>/<kbd>↓</kbd> při létání · <kbd>B</kbd> obchod · <kbd>P</kbd>/<kbd>Esc</kbd> pauza · <kbd>M</kbd> zvuky · <kbd>H</kbd> hudba · <kbd>C</kbd> celá obrazovka · 🎮 gamepad</p>
 
 <script>
 "use strict";
@@ -64,7 +73,7 @@
 //  Základní konstanty
 // ============================================================
 // Verze hry – s každým pushem se zvýší (0.0 → 0.1 → 0.2 …), viz CLAUDE.md a bump-version.sh
-const VERSION = '0.5';
+const VERSION = '0.6';
 
 const T = 32;                 // velikost dlaždice
 const VW = 800, VH = 480;     // velikost obrazovky
@@ -97,6 +106,7 @@ addEventListener('keydown', e => {
     if (e.code === 'KeyM') G.muted = !G.muted;                 // M = zvuky
     if (e.code === 'KeyH') G.musicOff = !G.musicOff;           // H = hudba
     if (e.code === 'KeyB') openShop();                         // B = obchod
+    if (e.code === 'KeyC') toggleFullscreen();                 // C = celá obrazovka
   }
   keys[e.code] = true;
 });
@@ -640,7 +650,7 @@ function newPlayer(x) {
            coyote: 0, airJumped: false, shield: !!SHOP.owned.shield, fire: 0, wings: 0, wheels: 0, spin: 0, wrot: 0, hintCd: 0, invuln: 0, fireCd: 0, breath: 0, anim: 0 };
 }
 function newGame() {
-  G.score = 0; G.spent = 0; G.coins = 0; G.lives = 3; G.time = 0; G.paused = false;
+  G.score = 0; G.wallet = 0; G.coins = 0; G.lives = 3; G.time = 0; G.paused = false;
   resetShop();
   startLevel(START_LEVEL);
 }
@@ -713,7 +723,7 @@ function spawnBonus(tx, ty, forced) {
     type = type || pool[0][0];
   }
   if (type === 'coin') {
-    addCoin(); G.score += 100;
+    addCoin(); addScore(100);
     popup(tx * T + 8, ty * T - 6, '+100', '#ffe066'); sfx.coin();
     puff(tx * T + 16, ty * T, '#ffd93b', 5);
     return;
@@ -722,14 +732,17 @@ function spawnBonus(tx, ty, forced) {
   sfx.bump();
 }
 
-function wallet() { return G.score - (G.spent || 0); }              // body k utracení v obchodě
+// Skóre = celkový výsledek; body k utracení (G.wallet) se v obchodě utrácejí. Obojí roste stejně.
+function addScore(n) { G.score += n; G.wallet = (G.wallet || 0) + n; }
+function wallet() { return G.wallet || 0; }
+// Konec hry (ztráta všech životů) = přijdeš o celé skóre i body k utracení; ztráta jednoho života body nebere.
 const fmt = n => Math.round(n).toLocaleString('cs-CZ');
 // kombo: další zašlápnutí bez dotyku země dává dvojnásobek (100, 200, 400, 800, 1600)
 function stompScore(e, mult) {
   const p = P;
   p.combo = (p.combo || 0) + 1;
   const pts = Math.min(1600, 100 * Math.pow(2, p.combo - 1)) * (mult || 1);
-  G.score += pts;
+  addScore(pts);
   popup(e.x - 6, e.y - 10, '+' + pts + (p.combo > 1 ? '  KOMBO ×' + p.combo : ''), p.combo > 1 ? '#ffd93b' : '#fff');
 }
 
@@ -746,7 +759,7 @@ function collectItem(it) {
   const p = P;
   if (it.type === 'life') { giveLife(); puff(it.x + 12, it.y + 12, '#ff6b8a', 10); return; }
   if (it.type === 'chest') {
-    G.score += 500; popup(it.x, it.y - 8, '+500', '#ffe066'); sfx.coin(); sfx.power();
+    addScore(500); popup(it.x, it.y - 8, '+500', '#ffe066'); sfx.coin(); sfx.power();
     puff(it.x + 12, it.y + 12, '#ffd93b', 10);
     return;
   }
@@ -754,7 +767,7 @@ function collectItem(it) {
   if (it.type === 'fire') p.fire = Math.round(3600 * ml);
   if (it.type === 'wings') p.wings = Math.round(600 * ml);
   if (it.type === 'shroom') p.wheels = Math.round(1800 * ml);
-  G.score += 100;
+  addScore(100);
   popup(it.x - 10, it.y - 10, BONUS_NAMES[it.type], '#7dffb0');
   sfx.power();
   puff(it.x + 12, it.y + 12, '#ffffff', 10);
@@ -767,7 +780,7 @@ function stickHit(e) {
   e.hits = 1; e.panic = true; e.stun = 30;
   const dx = (e.x + e.w / 2) - (P.x + P.w / 2);
   e.dir = Math.abs(dx) > 6 ? (dx > 0 ? 1 : -1) : P.face;    // první směr úniku: pryč od dráčka (při skoku shora tam, kam kouká)
-  G.score += 100; popup(e.x - 8, e.y - 20, 'ÁÁÁ!', '#ff8a8a'); sfx.scream();
+  addScore(100); popup(e.x - 8, e.y - 20, 'ÁÁÁ!', '#ff8a8a'); sfx.scream();
   puff(e.x + 11, e.y + 8, '#ff6a6a', 8);
   return true;
 }
@@ -815,14 +828,14 @@ function updateBananas(p) {
 function bossHit(e, dmg) {
   if (e.hurt > 0 || e.dying) return;
   e.hp -= dmg; e.hurt = BOSS.hurt;
-  G.score += 300; popup(e.x + 14, e.y - 10, 'AU!', '#ffe066'); sfx.kill(); puff(e.x + 32, e.y + 24, '#f7d02c', 12);
+  addScore(300); popup(e.x + 14, e.y - 10, 'AU!', '#ffe066'); sfx.kill(); puff(e.x + 32, e.y + 24, '#f7d02c', 12);
   if (e.hp <= 0) { e.dying = true; e.timer = 100; e.vy = -6; bananas = []; popup(e.x - 10, e.y - 30, 'POTÁPĚN!', '#7dffb0'); }
 }
 
 function updateBoss(e, p) {
   if (e.dying) {
     e.timer--; e.spin += 0.22;
-    if (e.timer <= 0) { e.dead = true; G.score += 5000 + G.lives * 500; G.state = 'win'; sfx.win(); }
+    if (e.timer <= 0) { e.dead = true; addScore(5000 + G.lives * 500); G.state = 'win'; sfx.win(); }
     return;
   }
   const rage = e.hp <= BOSS.hp / 2;
@@ -865,7 +878,10 @@ function loseLife(fell) {
   }
   G.lives--; G.lvHit = true;
   sfx.hurt();
-  if (G.lives <= 0) { G.state = 'over'; sfx.over(); return; }
+  if (G.lives <= 0) {                                   // konec hry: přijdeš o celé skóre i body k utracení (nákupy zůstávají)
+    G.lostAll = G.score; G.score = 0; G.wallet = 0;
+    G.state = 'over'; sfx.over(); return;
+  }
   if (fell) {
     const sx = checkpoint.reached ? checkpoint.spawnX : 2 * T;
     const old = P;
@@ -965,11 +981,11 @@ function updatePlay() {
         if (e.type === 'boss') { bossHit(e, 1); f.life = 0; continue; }
         if (e.type === 'stick' && stickHit(e)) { f.life = 0; continue; }
         e.dead = true; e.timer = 40; e.shot = true; e.vy = -5; f.life = 0;
-        G.score += 200; popup(e.x, e.y - 8, '+200', '#ff9f43'); sfx.kill(); puff(e.x + 14, e.y + 10, '#ff7a1a', 8);
+        addScore(200); popup(e.x, e.y - 8, '+200', '#ff9f43'); sfx.kill(); puff(e.x + 14, e.y + 10, '#ff7a1a', 8);
       }
     }
     for (const b of bananas) {                                         // oheň banán zničí
-      if (!b.dead && overlap(f, b)) { b.dead = true; f.life = 0; G.score += 25; sfx.kill(); puff(b.x + 10, b.y + 10, '#ffb02e', 8); }
+      if (!b.dead && overlap(f, b)) { b.dead = true; f.life = 0; addScore(25); sfx.kill(); puff(b.x + 10, b.y + 10, '#ffb02e', 8); }
     }
     if (f.y > LH * T) f.life = 0;
   }
@@ -1011,7 +1027,7 @@ function updatePlay() {
         // traktor: první přejetí Pankáče jen vyděsí
       } else if (p.wheels > 0) {
         e.dead = true; e.timer = 30;
-        G.score += 100; popup(e.x, e.y - 8, '+100', '#ffb27a'); sfx.stomp(); puff(e.x + 14, e.y + e.h, '#ffd93b', 8);
+        addScore(100); popup(e.x, e.y - 8, '+100', '#ffb27a'); sfx.stomp(); puff(e.x + 14, e.y + e.h, '#ffd93b', 8);
       } else if (p.invuln <= 0) {
         loseLife(false);
         if (G.state !== 'play') return;
@@ -1033,7 +1049,7 @@ function updatePlay() {
   // mince
   for (const c of coinsList) {
     if (!c.got && overlap(p, c)) {
-      c.got = true; addCoin(); G.score += 50; sfx.coin();
+      c.got = true; addCoin(); addScore(50); sfx.coin();
       popup(c.x, c.y - 4, '+50', '#ffe066');
     }
   }
@@ -1054,7 +1070,7 @@ function updatePlay() {
     const c = { base: 500 + G.level * 100, time: Math.max(0, Math.round(par - secs)) * 50, noHit: G.lvHit ? 0 : 1000,
                 coins: total > 0 && got === total ? 1000 : 0, got, total, secs, par };
     c.sum = c.base + c.time + c.noHit + c.coins;
-    G.clear = c; G.clearBonus = c.sum; G.score += c.sum; G.state = 'clear'; sfx.win();
+    G.clear = c; G.clearBonus = c.sum; addScore(c.sum); G.state = 'clear'; sfx.win();
   }
 
   // částice
@@ -1585,12 +1601,12 @@ function drawWheel(x, y, r, rot) {
 // ===== skiny dráčka =====
 const SKINS = [
   { id: 'green',   name: 'Zelený (základní)', price: 0,    body: '#3cb44b', dark: '#2a8f39', wing: '#7fd68b', belly: '#f6e58d', accent: '#ff8c42', desc: 'Klasický zelený dráček.' },
-  { id: 'blue',    name: 'Modrý',             price: 500,  body: '#3c8ee0', dark: '#2a6db0', wing: '#8fc4f5', belly: '#f6f0c0', accent: '#ffd24a', desc: 'Dráček v barvě moře.' },
-  { id: 'red',     name: 'Červený',           price: 500,  body: '#e0463c', dark: '#a8302a', wing: '#f59a8f', belly: '#ffe3b0', accent: '#ffd24a', desc: 'Ohnivý červený dráček.' },
-  { id: 'pink',    name: 'Růžový',            price: 600,  body: '#f06ab4', dark: '#c04a8a', wing: '#f9a8d8', belly: '#fff0c8', accent: '#7a2fd0', desc: 'Cukrově růžový dráček.' },
-  { id: 'purple',  name: 'Fialový',           price: 800,  body: '#8a54d6', dark: '#6438a8', wing: '#b99af0', belly: '#f2e0ff', accent: '#ffcf3a', desc: 'Tajemný fialový dráček.' },
-  { id: 'gold',    name: 'Zlatý',             price: 3000, body: '#f2c230', dark: '#c99700', wing: '#ffe27a', belly: '#fff6c8', accent: '#d33b3b', desc: 'Třpytivý zlatý drak pro opravdové šampiony.' },
-  { id: 'rainbow', name: 'Duhový',            price: 5000, body: '#fff',    dark: '#fff',    wing: '#fff',    belly: '#fff6d0', accent: '#fff',    desc: 'Barvy se plynule střídají, jako duha.' },
+  { id: 'blue',    name: 'Modrý',             price: 1500, body: '#3c8ee0', dark: '#2a6db0', wing: '#8fc4f5', belly: '#f6f0c0', accent: '#ffd24a', desc: 'Dráček v barvě moře.' },
+  { id: 'red',     name: 'Červený',           price: 1500, body: '#e0463c', dark: '#a8302a', wing: '#f59a8f', belly: '#ffe3b0', accent: '#ffd24a', desc: 'Ohnivý červený dráček.' },
+  { id: 'pink',    name: 'Růžový',            price: 2000, body: '#f06ab4', dark: '#c04a8a', wing: '#f9a8d8', belly: '#fff0c8', accent: '#7a2fd0', desc: 'Cukrově růžový dráček.' },
+  { id: 'purple',  name: 'Fialový',           price: 2500, body: '#8a54d6', dark: '#6438a8', wing: '#b99af0', belly: '#f2e0ff', accent: '#ffcf3a', desc: 'Tajemný fialový dráček.' },
+  { id: 'gold',    name: 'Zlatý',             price: 12000, lvl: 10, body: '#f2c230', dark: '#c99700', wing: '#ffe27a', belly: '#fff6c8', accent: '#d33b3b', desc: 'Třpytivý zlatý drak pro opravdové šampiony.' },
+  { id: 'rainbow', name: 'Duhový',            price: 20000, lvl: 15, body: '#fff',    dark: '#fff',    wing: '#fff',    belly: '#fff6d0', accent: '#fff',    desc: 'Barvy se plynule střídají, jako duha.' },
 ];
 function animT() { return G.time + (G.shopOpen ? Math.floor(SH.anim * 20) : 0); }
 function dragonPalette(id) {
@@ -2008,7 +2024,8 @@ function drawHUD() {
   text('k utracení ' + fmt(wallet()), VW - 16, 52, 13, '#ffe066', 'right');
   if (G.touch) drawTouchButtons();
   else {
-    text('B – obchod', VW - 16, VH - 10, 14, 'rgba(255,255,255,.85)', 'right');
+    text('B – obchod' + (FS_OK ? ' · C – celá obrazovka' : ''), VW - 16, VH - 10, 14, 'rgba(255,255,255,.85)', 'right');
+    if (FS_OK) UI.hits.push({ x: VW - 170, y: VH - 26, w: 170, h: 24, fn: toggleFullscreen });
     if (G.muted) text('ZVUKY VYP (M)', VW - 16, 72, 13, '#ffd9d9', 'right');
     if (G.musicOff) text('HUDBA VYP (H)', VW - 16, G.muted ? 88 : 72, 13, '#ffd9d9', 'right');
   }
@@ -2019,30 +2036,30 @@ function drawHUD() {
 // ============================================================
 const SHOP_TABS = ['VYLEPŠENÍ', 'SKINY', 'OBLEČENÍ'];
 const CLOTHES = [
-  { id: 'cap',    slot: 'head', icon: '🧢', name: 'Kšiltovka',      price: 600,  desc: 'Sportovní červená kšiltovka.' },
-  { id: 'tophat', slot: 'head', icon: '🎩', name: 'Cylindr',        price: 1200, desc: 'Elegantní cylindr pro pravého gentlemana.' },
-  { id: 'crown',  slot: 'head', icon: '👑', name: 'Korunka',        price: 2500, desc: 'Zlatá koruna s drahokamy. Král všech dráčků.' },
-  { id: 'shades', slot: 'face', icon: '🕶️', name: 'Sluneční brýle', price: 800,  desc: 'Drsné černé brýle – cool dráček.' },
-  { id: 'mask',   slot: 'face', icon: '🎭', name: 'Maska hrdiny',   price: 700,  desc: 'Tajemná maska superhrdiny.' },
-  { id: 'scarf',  slot: 'body', icon: '🧣', name: 'Šála',           price: 700,  desc: 'Teplá červená šála vlající ve větru.' },
-  { id: 'bow',    slot: 'body', icon: '🎀', name: 'Motýlek',        price: 500,  desc: 'Slavnostní červený motýlek.' },
-  { id: 'cape',   slot: 'body', icon: '🦸', name: 'Plášť hrdiny',   price: 2000, desc: 'Rudý plášť, který se za tebou vlní.' },
+  { id: 'cap',    slot: 'head', icon: '🧢', name: 'Kšiltovka',      price: 2000,  desc: 'Sportovní červená kšiltovka.' },
+  { id: 'tophat', slot: 'head', icon: '🎩', name: 'Cylindr',        price: 4000, desc: 'Elegantní cylindr pro pravého gentlemana.' },
+  { id: 'crown',  slot: 'head', icon: '👑', name: 'Korunka',        price: 10000, lvl: 10, desc: 'Zlatá koruna s drahokamy. Král všech dráčků.' },
+  { id: 'shades', slot: 'face', icon: '🕶️', name: 'Sluneční brýle', price: 2500,  desc: 'Drsné černé brýle – cool dráček.' },
+  { id: 'mask',   slot: 'face', icon: '🎭', name: 'Maska hrdiny',   price: 2000,  desc: 'Tajemná maska superhrdiny.' },
+  { id: 'scarf',  slot: 'body', icon: '🧣', name: 'Šála',           price: 2000,  desc: 'Teplá červená šála vlající ve větru.' },
+  { id: 'bow',    slot: 'body', icon: '🎀', name: 'Motýlek',        price: 1500,  desc: 'Slavnostní červený motýlek.' },
+  { id: 'cape',   slot: 'body', icon: '🦸', name: 'Plášť hrdiny',   price: 6000, desc: 'Rudý plášť, který se za tebou vlní.' },
 ];
 const SHOP_ITEMS = [
-  [ { id: 'fire',     icon: '🔥', name: 'Ohnivý dech',    price: 3000, desc: 'Chrlení ohně (Shift / F / tlačítko) máš stále, i bez bonusu z bloku ?.' },
-    { id: 'fastfire', icon: '⚡', name: 'Rychlý oheň',    price: 2000, desc: 'Kratší pauza mezi výstřely – oheň šlehá téměř dvakrát rychleji.' },
-    { id: 'life',     icon: '❤️', name: 'Extra život',    price: 1000, desc: '+1 život (nejvýš 9). Dá se kupovat opakovaně.', repeat: true },
-    { id: 'shield',   icon: '🛡️', name: 'Štít',           price: 3000, desc: 'V každém levelu tě ochrání před prvním zásahem nepřítele.' },
-    { id: 'longer',   icon: '⏱️', name: 'Delší bonusy',   price: 3500, desc: 'Oheň, létání i traktor z bloků trvají o polovinu déle.' },
-    { id: 'speed',    icon: '👟', name: 'Rychlejší běh',  price: 2000, desc: 'Dráček běhá o 10 % rychleji.' } ],
-  SKINS.map(k => ({ id: k.id, name: k.name, price: k.price, desc: k.desc })),
+  [ { id: 'fire',     icon: '🔥', name: 'Ohnivý dech',    price: 9000, lvl: 3, desc: 'Chrlení ohně (Shift / F / tlačítko) máš stále, i bez bonusu z bloku ?.' },
+    { id: 'fastfire', icon: '⚡', name: 'Rychlý oheň',    price: 6000, req: 'fire', desc: 'Kratší pauza mezi výstřely – oheň šlehá téměř dvakrát rychleji.' },
+    { id: 'life',     icon: '❤️', name: 'Extra život',    price: 2500, desc: '+1 život (nejvýš 9). Každý další je o 1 500 dražší.', repeat: true },
+    { id: 'shield',   icon: '🛡️', name: 'Štít',           price: 8000, lvl: 5, desc: 'V každém levelu tě ochrání před prvním zásahem nepřítele.' },
+    { id: 'longer',   icon: '⏱️', name: 'Delší bonusy',   price: 7000, desc: 'Oheň, létání i traktor z bloků trvají o polovinu déle.' },
+    { id: 'speed',    icon: '👟', name: 'Rychlejší běh',  price: 5000, desc: 'Dráček běhá o 10 % rychleji.' } ],
+  SKINS.map(k => ({ id: k.id, name: k.name, price: k.price, lvl: k.lvl, desc: k.desc })),
   CLOTHES,
 ];
 const SHOP = { owned: {}, skin: 'green', head: null, face: null, body: null };
 const SH = { tab: 0, sel: 0, hits: [], anim: 0, msg: '', msgOk: true, msgT: 0 };
 const UI = { hits: [] };                                   // klikací oblasti dotykových tlačítek na plátně
 
-function resetShop() { SHOP.owned = {}; SHOP.skin = 'green'; SHOP.head = SHOP.face = SHOP.body = null; SH.tab = 0; SH.sel = 0; }
+function resetShop() { SHOP.lifeBought = 0; SHOP.owned = {}; SHOP.skin = 'green'; SHOP.head = SHOP.face = SHOP.body = null; SH.tab = 0; SH.sel = 0; }
 function openShop() {
   if ((G.state !== 'play' && G.state !== 'clear') || G.shopOpen) return;
   G.shopOpen = true; jumpBuf = 0; SH.msgT = 0;
@@ -2052,10 +2069,19 @@ function closeShop() { G.shopOpen = false; jumpBuf = 0; pressedEnter = false; fo
 function shopTab(i) { SH.tab = (i + SHOP_TABS.length) % SHOP_TABS.length; SH.sel = 0; }
 function shopMsg(t, ok) { SH.msg = t; SH.msgOk = ok; SH.msgT = 160; }
 
+// cena (život zdražuje s každým nákupem) a zámek (od určitého levelu / nejdřív jiná věc)
+function itemPrice(it) { return it.id === 'life' ? it.price + (SHOP.lifeBought || 0) * 1500 : it.price; }
+function lockReason(it) {
+  if (it.lvl && G.level < it.lvl) return 'od levelu ' + it.lvl;
+  if (it.req && !SHOP.owned[it.req]) return 'nejdřív ' + SHOP_ITEMS[0].find(x => x.id === it.req).name;
+  return null;
+}
 function itemState(tab, it) {
-  const afford = wallet() >= it.price ? 'buy' : 'poor';
+  const afford = wallet() >= itemPrice(it) ? 'buy' : 'poor';
+  const owned = tab === 0 ? (!it.repeat && SHOP.owned[it.id]) : (it.price === 0 || SHOP.owned[it.id]);
+  if (!owned && lockReason(it)) return 'locked';
   if (tab === 0) return it.repeat ? (G.lives >= 9 ? 'max' : afford) : (SHOP.owned[it.id] ? 'owned' : afford);
-  if (tab === 1) return SHOP.skin === it.id ? 'equipped' : (it.price === 0 || SHOP.owned[it.id]) ? 'owned' : afford;
+  if (tab === 1) return SHOP.skin === it.id ? 'equipped' : owned ? 'owned' : afford;
   return SHOP[it.slot] === it.id ? 'equipped' : SHOP.owned[it.id] ? 'owned' : afford;
 }
 
@@ -2064,7 +2090,8 @@ function shopAct() {
   if (!it) return;
   const st = itemState(SH.tab, it);
   if (st === 'buy') {
-    G.spent = (G.spent || 0) + it.price;
+    G.wallet = wallet() - itemPrice(it);
+    if (it.id === 'life') SHOP.lifeBought = (SHOP.lifeBought || 0) + 1;
     if (SH.tab === 0) {
       if (it.id === 'life') G.lives++;
       else { SHOP.owned[it.id] = true; if (it.id === 'shield' && P) P.shield = true; }
@@ -2077,7 +2104,8 @@ function shopAct() {
     sfx.coin(); shopMsg('Nasazeno: ' + it.name, true);
   } else if (st === 'equipped') {
     if (SH.tab === 2) { SHOP[it.slot] = null; sfx.bump(); shopMsg('Sundáno: ' + it.name, true); }
-  } else if (st === 'poor') { sfx.bump(); shopMsg('Nemáš dost bodů (chybí ' + fmt(it.price - wallet()) + ').', false); }
+  } else if (st === 'poor') { sfx.bump(); shopMsg('Nemáš dost bodů (chybí ' + fmt(itemPrice(it) - wallet()) + ').', false); }
+  else if (st === 'locked') { sfx.bump(); shopMsg('Zamčeno – ' + lockReason(it) + '.', false); }
   else if (st === 'max') { sfx.bump(); shopMsg('Už máš maximum životů (9).', false); }
 }
 
@@ -2150,7 +2178,8 @@ function drawShop() {
     if (st === 'equipped') { label = '● Nasazeno'; lc = '#7fe8ff'; }
     else if (st === 'owned') { label = SH.tab === 0 ? '✓ Koupeno' : '✓ Koupeno · nasadit'; lc = '#8affb0'; }
     else if (st === 'max') { label = 'Maximum (9 životů)'; lc = '#aaa'; }
-    else { label = c.price + ' bodů'; lc = st === 'poor' ? '#ff9a9a' : '#ffd93b'; }
+    else if (st === 'locked') { label = '🔒 ' + lockReason(c); lc = '#9a96b8'; }
+    else { label = fmt(itemPrice(c)) + ' bodů'; lc = st === 'poor' ? '#ff9a9a' : '#ffd93b'; }
     text(label, x + 54, y + 46, 14, lc, 'left', false);
     SH.hits.push({ x, y, w, h, fn: () => { if (SH.sel === i) shopAct(); else SH.sel = i; } });
   });
@@ -2172,7 +2201,8 @@ function drawShop() {
   }
   const st = itemState(SH.tab, it);
   let bl, bf;
-  if (st === 'buy') { bl = 'KOUPIT za ' + it.price; bf = '#2f9e44'; }
+  if (st === 'buy') { bl = 'KOUPIT za ' + fmt(itemPrice(it)); bf = '#2f9e44'; }
+  else if (st === 'locked') { bl = '🔒 ZAMČENO'; bf = '#3b3b4d'; }
   else if (st === 'owned') { bl = SH.tab === 0 ? 'KOUPENO' : 'NASADIT'; bf = SH.tab === 0 ? '#3b3b4d' : '#2a6fd0'; }
   else if (st === 'equipped') { bl = SH.tab === 2 ? 'SUNDAT' : '✓ NASAZENO'; bf = SH.tab === 2 ? '#7a5a2a' : '#3b3b4d'; }
   else if (st === 'poor') { bl = 'MÁLO BODŮ'; bf = '#7a2e2e'; }
@@ -2191,7 +2221,7 @@ function drawTouchButtons() {
     { ic: '♪', fs: 22, off: G.musicOff, fn: () => { G.musicOff = !G.musicOff; } },
     { ic: '🔊', fs: 16, off: G.muted, fn: () => { G.muted = !G.muted; } },
   ];
-  if (document.fullscreenEnabled && !document.fullscreenElement) defs.push({ ic: '⛶', fs: 20, fn: goFullscreen });
+  if (FS_OK) defs.push({ ic: '⛶', fs: 20, off: false, fn: toggleFullscreen });
   defs.forEach((d, i) => {
     const cx = VW - 8 - R - i * (2 * R + 8), cy = 64 + R;
     ctx.fillStyle = 'rgba(0,0,0,.45)'; ctx.beginPath(); ctx.arc(cx, cy, R, 0, 7); ctx.fill();
@@ -2203,11 +2233,24 @@ function drawTouchButtons() {
     UI.hits.push({ x: cx - R - 4, y: cy - R - 4, w: 2 * R + 8, h: 2 * R + 8, fn: d.fn });
   });
 }
+// Celá obrazovka přes Fullscreen API (PC, Android, iPad). iPhone ho nemá – tam „Sdílet → Přidat na plochu“.
+const FS_OK = !!(document.fullscreenEnabled || document.webkitFullscreenEnabled);
+const isFs = () => !!(document.fullscreenElement || document.webkitFullscreenElement);
 function goFullscreen() {
   const el = document.documentElement;
-  const p = el.requestFullscreen ? el.requestFullscreen({ navigationUI: 'hide' }) : null;
-  if (p && p.then) p.then(() => { try { screen.orientation.lock('landscape').catch(() => {}); } catch (e) {} }).catch(() => {});
+  const req = el.requestFullscreen || el.webkitRequestFullscreen;
+  if (!req) return;
+  try {
+    const p = req.call(el, { navigationUI: 'hide' });
+    const lock = () => { try { screen.orientation.lock('landscape').catch(() => {}); } catch (e) {} };
+    if (p && p.then) p.then(() => { if (G.touch) lock(); }).catch(() => {}); else if (G.touch) lock();
+  } catch (e) {}
 }
+function toggleFullscreen() {
+  if (isFs()) { const ex = document.exitFullscreen || document.webkitExitFullscreen; if (ex) ex.call(document); }
+  else goFullscreen();
+}
+const IOS_PHONE = /iPhone|iPod/.test(navigator.userAgent) && !navigator.standalone;
 
 function overlay(alpha = 0.55) { ctx.fillStyle = `rgba(10,8,25,${alpha})`; ctx.fillRect(0, 0, VW, VH); }
 
@@ -2221,6 +2264,8 @@ function drawTitle() {
   text('plošinovka', VW / 2, 158, 26, '#fff', 'center');
   drawDragon(VW / 2, 400, 1, G.time * 0.1, false, 0, (G.time % 120) < 10 ? 10 - (G.time % 120) : 0, 3.2, (G.time % 150) > 140, shopFx());
   if (Math.floor(G.time / 30) % 2 === 0) text(G.touch ? 'Klepni na obrazovku' : 'Stiskni ENTER nebo MEZERNÍK', VW / 2, 440, 24, '#fff', 'center');
+  if (IOS_PHONE) text('Celá obrazovka na iPhonu: Sdílet ⬆ → Přidat na plochu', VW / 2, 470, 14, '#ffe066', 'center');
+  else if (FS_OK) text(G.touch ? 'Hra se po klepnutí přepne na celou obrazovku' : 'C – celá obrazovka', VW / 2, 470, 14, '#ffe066', 'center');
   text('Projdi 21 levelů, sbírej mince i životy a poraž Mimoně na hradě!', VW / 2, 200, 17, '#fff', 'center');
   text('Bonusy v blocích ?: oheň · létání · traktorová kola · truhlička', VW / 2, 228, 16, '#ffe066', 'center');
   text('Pozor na Pankáče: po prvním zásahu utíká, zničíš ho až druhým!', VW / 2, 254, 15, '#ffb27a', 'center');
@@ -2235,9 +2280,9 @@ function drawEnd(win) {
     text('(v tom bonus za Mimoně +5 000 a za životy +' + fmt(G.lives * 500) + ')', VW / 2, 290, 16, '#ffe066', 'center');
   } else {
     text('KONEC HRY', VW / 2, 180, 60, '#ff6b6b', 'center');
-    text('Došel jsi do levelu ' + G.level + ' · skóre: ' + fmt(G.score), VW / 2, 232, 24, '#fff', 'center');
-    text('Pokračuješ znovu od levelu ' + G.level + ' se 3 životy,', VW / 2, 264, 17, '#ffd9d9', 'center');
-    text('body i nákupy z obchodu ti zůstávají (hra se neukládá).', VW / 2, 288, 15, '#ffd9d9', 'center');
+    text('Přišel jsi o skóre ' + fmt(G.lostAll || 0) + ' bodů.', VW / 2, 232, 24, '#fff', 'center');
+    text('Pokračuješ znovu od levelu ' + G.level + ' se 3 životy a skóre 0,', VW / 2, 264, 17, '#ffd9d9', 'center');
+    text('věci koupené v obchodě ti zůstávají (hra se neukládá).', VW / 2, 288, 15, '#ffd9d9', 'center');
   }
   if (G.t2 > 45) text(tapHint(win ? 'nová hra' : 'pokračovat v levelu ' + G.level), VW / 2, 338, 22, '#fff', 'center');
 }
@@ -2417,7 +2462,7 @@ canvas.addEventListener('pointerdown', e => {              // klepnutí/klik na 
     for (const h of UI.hits) if (x >= h.x && x <= h.x + h.w && y >= h.y && y <= h.y + h.h) { h.fn(); return; }
   }
   if (G.state === 'play') { if (G.paused) G.paused = false; }
-  else pressedEnter = true;
+  else { if (G.state === 'title' && G.touch && FS_OK && !isFs()) goFullscreen(); pressedEnter = true; }
 });
 canvas.addEventListener('contextmenu', e => e.preventDefault());
 addEventListener('touchstart', () => setTouch(true), { passive: true });
@@ -2427,6 +2472,7 @@ fitCanvas();
 if (window.ResizeObserver) new ResizeObserver(fitCanvas).observe(canvas);
 addEventListener('resize', fitCanvas);
 addEventListener('orientationchange', () => setTimeout(fitCanvas, 250));
+['fullscreenchange', 'webkitfullscreenchange'].forEach(ev => document.addEventListener(ev, () => { document.body.classList.toggle('fs', isFs()); requestAnimationFrame(fitCanvas); }));
 
 G.level = 1; G.banner = 0; G.t2 = 0; G.shopOpen = false; G.musicOff = false;
 buildLevel(1);

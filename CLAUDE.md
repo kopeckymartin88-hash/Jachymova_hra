@@ -21,7 +21,7 @@ https://kopeckymartin88-hash.github.io/Jachymova_hra/
   (délka 150–240 dlaždic, víc děr, rour, nepřátel i rychlejších směrem k levelu 20; Pankáč od levelu 3).
 - **Level 21** je hradní aréna s bossem Mimoněm (`buildBoss`, vlastnosti bosse v konstantě `BOSS` – zatím zástupné hodnoty).
 - Každý level má vlastní motiv prostředí v poli `THEMES` (barvy, pozadí, počasí, vzhled dlaždic i děr).
-- Hra se neukládá. Po konci hry pokračuje hráč **v levelu, kde zemřel** (3 životy, body i nákupy zůstávají); po výhře nad bossem začíná nová hra (vše se nuluje). Životy se dají získat srdíčky 1UP a každými 50 mincemi (max. 9).
+- Hra se neukládá. Po konci hry pokračuje hráč **v levelu, kde zemřel** (3 životy, **skóre i body k utracení se vynulují**, nákupy zůstávají); po výhře nad bossem začíná nová hra (vše se nuluje). Životy se dají získat srdíčky 1UP a každými 50 mincemi (max. 9).
 - Pro zkoušení lze hru spustit od libovolného levelu: `index.html?level=12`.
 - Překážky, které vypadají jako **záchody** (dlaždice `T`, 2 široké, 1–3 vysoké), nahradily původní roury. Víko a sedátko mají barvu motivu.
 - Boss Mimoň **háže banány** (`throwBanana`, `updateBananas`): letí obloukem k hráči, dá se jim uhnout nebo je sestřelit ohněm; ve zuřivé fázi hází dva naráz.
@@ -40,10 +40,17 @@ https://kopeckymartin88-hash.github.io/Jachymova_hra/
   **skiny** dráčka (`SKINS`) a **oblečení** (`CLOTHES`: hlava / obličej / tělo). Katalog je v `SHOP_ITEMS`, stav nákupů v `SHOP`.
 - Obchod jde otevřít ve hře i na obrazovce „level splněn“, hra se při něm zastaví (včetně hudby). Ovládá se klávesami i dotykem.
 - Nákupy se neukládají (po obnovení stránky jsou pryč) a po výhře se nulují.
+- Ceny jsou nastavené tak, aby se na vše muselo sbírat celou hru (~100 000 bodů). Některé věci jsou zamčené (`lvl` = od levelu, `req` = nejdřív jiná věc);
+  Extra život zdražuje o 1 500 s každým nákupem (`itemPrice`).
 
 ## Bodování
 - Mince 50 · mince z bloku ? 100 · truhlička 500 · bonus z bloku 100 · oheň zabije 200 · traktor 100 · banán ohněm 25.
 - Zašlápnutí nepřítele: **kombo** bez dotyku země 100 → 200 → 400 → 800 → 1600 (`stompScore`); Pankáč ×3.
 - Konec levelu (`G.clear`): cíl 500 + 100 × level, čas pod limitem 50 / s, bez zranění +1000, všechny mince +1000.
 - Boss: 300 za zásah, výhra +5000 a +500 za každý život.
-- **Skóre** (`G.score`) se nákupy nesnižuje; v obchodě se utrácejí **body k utracení** = `wallet()` = skóre − `G.spent`.
+- Body se přičítají přes `addScore(n)` – zvýší **skóre** (`G.score`) i **body k utracení** (`G.wallet`, `wallet()`). Nákup snižuje jen `G.wallet`.
+- **Konec hry** (ztráta všech životů) = skóre i body k utracení na 0. Ztráta jednoho života body nebere.
+
+## Celá obrazovka
+- Klávesa **C** / tlačítko ⛶ (`toggleFullscreen`, Fullscreen API) – PC, Android, iPad. Na dotykovém zařízení se zapne už prvním klepnutím na titulní obrazovku.
+- iPhone Fullscreen API nemá: celá obrazovka jde přes **Sdílet → Přidat na plochu** (`manifest.webmanifest`, ikony `icon-192/512.png`, `apple-touch-icon.png`).
