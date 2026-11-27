@@ -11,7 +11,9 @@ https://kopeckymartin88-hash.github.io/Jachymova_hra/
 
 ## Poznámky
 - Vývojová větev: `claude/gracious-cannon-qnfziu`.
-- Ovládání: šipky/WASD, skok ↑/W/Mezerník (2× = dvojskok), oheň Shift/F/X (s bonusem nebo koupený v obchodě), B obchod, P pauza, **M zvuky**, **H hudba**.
+- Ovládání: šipky/WASD, skok ↑/W/Mezerník (2× = dvojskok), oheň Shift/F/X (s bonusem nebo koupený v obchodě), B obchod, P/Esc pauza, **M zvuky**, **H hudba**; podporován i **gamepad** (`pollGamepad`: A skok, X/B oheň, Start pauza, Y obchod).
+- Plátno se kreslí v rozlišení displeje (`fitCanvas`, `RS` max. 2×); když zařízení nestíhá (< 45 fps), kvalita se sníží. Kresli vždy v logických souřadnicích 800×480.
+- Telefon na výšku ukáže výzvu k otočení (`#rotate`) a hru zapauzuje. Na iOS se zvuk odemyká v `unlockAudio`.
 - Na tabletu/telefonu se zapne dotykové ovládání (HTML tlačítka `#touch` + tlačítka nakreslená na plátně `drawTouchButtons`); klepnutí na plátno = Enter v menu.
 
 ## Levely (21 celkem)
@@ -38,3 +40,10 @@ https://kopeckymartin88-hash.github.io/Jachymova_hra/
   **skiny** dráčka (`SKINS`) a **oblečení** (`CLOTHES`: hlava / obličej / tělo). Katalog je v `SHOP_ITEMS`, stav nákupů v `SHOP`.
 - Obchod jde otevřít ve hře i na obrazovce „level splněn“, hra se při něm zastaví (včetně hudby). Ovládá se klávesami i dotykem.
 - Nákupy se neukládají (po obnovení stránky jsou pryč) a po výhře se nulují.
+
+## Bodování
+- Mince 50 · mince z bloku ? 100 · truhlička 500 · bonus z bloku 100 · oheň zabije 200 · traktor 100 · banán ohněm 25.
+- Zašlápnutí nepřítele: **kombo** bez dotyku země 100 → 200 → 400 → 800 → 1600 (`stompScore`); Pankáč ×3.
+- Konec levelu (`G.clear`): cíl 500 + 100 × level, čas pod limitem 50 / s, bez zranění +1000, všechny mince +1000.
+- Boss: 300 za zásah, výhra +5000 a +500 za každý život.
+- **Skóre** (`G.score`) se nákupy nesnižuje; v obchodě se utrácejí **body k utracení** = `wallet()` = skóre − `G.spent`.
